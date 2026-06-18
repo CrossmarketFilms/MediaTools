@@ -1,0 +1,41 @@
+#!/opt/cmsg-bgremove/bin/python
+
+import sys
+import cv2
+import json
+
+if len(sys.argv) < 4:
+    print("Usage: blend-faces.py poster actor output")
+    sys.exit(1)
+
+poster_path = sys.argv[1]
+actor_path = sys.argv[2]
+output_path = sys.argv[3]
+
+poster = cv2.imread(poster_path)
+actor = cv2.imread(actor_path)
+
+if poster is None:
+    raise Exception("Could not read poster")
+if actor is None:
+    raise Exception("Could not read actor")
+
+cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+face_cascade = cv2.CascadeClassifier(cascade_path)
+
+poster_gray = cv2.cvtColor(poster, cv2.COLOR_BGR2GRAY)
+actor_gray = cv2.cvtColor(actor, cv2.COLOR_BGR2GRAY)
+
+poster_faces = face_cascade.detectMultiScale(poster_gray, 1.08, 4, minSize=(40, 40))
+actor_faces = face_cascade.detectMultiScale(actor_gray, 1.08, 4, minSize=(40, 40))
+
+debug = {
+    "poster": poster_path,
+    "actor": actor_path,
+    "poster_faces": [list(map(int, f)) for f in poster_faces],
+    "actor_faces": [list(map(int, f)) for f in actor_faces],
+}
+
+print(json.dumps(debug))
+
+cv2.imwrite(output_path, poster)

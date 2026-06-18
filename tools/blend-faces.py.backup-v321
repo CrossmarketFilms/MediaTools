@@ -1,0 +1,90 @@
+#!/opt/cmsg-bgremove/bin/python
+
+import sys
+import cv2
+import numpy as np
+from PIL import Image
+
+if len(sys.argv) < 4:
+    print("Usage: blend-faces.py poster actor output")
+    sys.exit(1)
+
+poster_path = sys.argv[1]
+actor_path = sys.argv[2]
+output_path = sys.argv[3]
+
+poster = cv2.imread(poster_path)
+actor = cv2.imread(actor_path)
+
+if poster is None:
+    raise Exception("Could not read poster")
+if actor is None:
+    raise Exception("Could not read actor")
+
+gray_poster = cv2.cvtColor(poster, cv2.COLOR_BGR2GRAY)
+gray_actor = cv2.cvtColor(actor, cv2.COLOR_BGR2GRAY)
+
+cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+face_cascade = cv2.CascadeClassifier(cascade_path)
+
+poster_faces = face_cascade.detectMultiScale(gray_poster, 1.1, 5)
+actor_faces = face_cascade.detectMultiScale(gray_actor, 1.1, 5)
+
+if len(poster_faces) == 0:
+    print("No poster face detected")
+    cv2.imwrite(output_path, poster)
+    sys.exit(0)
+
+if len(actor_faces) == 0:
+    print("No actor face detected")
+    cv2.imwrite(output_path, poster)
+    sys.exit(0)
+
+# largest poster face
+poster_faces = sorted(poster_faces, key=lambda r: r[2] * r[3], reverse=True)
+actor_faces = sorted(actor_faces, key=lambda r: r[2] * r[3], reverse=True)
+
+px, py, pw, ph = poster_faces[0]
+ax, ay, aw, ah = actor_faces[0]
+
+actor_face = actor[ay:ay+ah, ax:ax+aw]
+
+# Resize actor face to poster face size
+actor_face_resized = cv2.resize(actor_face, (pw, ph), interpolation=cv2.INTER_LANCZOS4)
+
+# Create oval mask
+mask = np.zeros((ph, pw), dtype=np.uint8)
+cv2.ellipse(
+    mask,
+    (pw // 2, ph // 2),
+    (int(pw * 0.46), int(ph * 0.50)),
+    0,
+    0,
+    360,
+    255,
+    -1
+)
+
+mask = cv2.GaussianBlur(mask, (31, 31), 0)
+
+center = (px + pw // 2, py + ph // 2)
+
+try:
+    blended = cv2.seamlessClone(
+        actor_face_resized,
+        poster,
+        mask,
+        center,
+        cv2.NORMAL_CLONE
+    )
+except Exception:
+    blended = poster.copy()
+    roi = blended[py:py+ph, px:px+pw]
+    alpha = mask.astype(float) / 255.0
+    alpha = alpha[..., None]
+    blended[py:py+ph, px:px+pw] = (
+        actor_face_resized * alpha + roi * (1 - alpha)
+    ).astype(np.uint8)
+
+cv2.imwrite(output_path, blended)
+print(output_path)

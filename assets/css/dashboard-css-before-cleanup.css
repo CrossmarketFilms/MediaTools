@@ -1,0 +1,520 @@
+.cmmt-dashboard{max-width:1320px;margin:32px auto;padding:0 20px;font-family:Inter,Arial,sans-serif;color:#fff}.cmmt-hero{background:linear-gradient(180deg,#0f141c,#090d13);border:1px solid #283140;border-radius:28px;padding:28px;margin-bottom:24px}.cmmt-kicker{display:inline-block;font-size:12px;color:#ffd84c;letter-spacing:.14em;text-transform:uppercase;font-weight:700}.cmmt-card-grid{display:grid;grid-template-columns:1fr;gap:22px}.cmmt-card{background:#0f141c;border:1px solid #283140;border-radius:28px;padding:24px}
+/* ===== v2.7 HERO HEADER FIX ===== */
+
+.cmmt-hero {
+    background: linear-gradient(135deg, #0b0f14 0%, #1a2430 60%, #5a0f0f 100%);
+    padding: 40px;
+    border-radius: 14px;
+    margin-bottom: 25px;
+}
+
+.cmmt-hero h1 {
+    color: #ffffff !important;
+    font-size: 42px;
+    font-weight: 700;
+    line-height: 1.2;
+}
+
+.cmmt-hero p {
+    color: #d1d5db !important;
+    font-size: 16px;
+    margin-top: 10px;
+}
+
+.cmmt-kicker {
+    color: #facc15 !important;
+    font-weight: 600;
+    letter-spacing: 1px;
+    font-size: 13px;
+}
+/* ===== Download Button Spacing Fix ===== */
+
+#cmmt-large-download-wrap,
+#cmsg-download-wrap,
+#cmmt-drive-download-wrap {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 14px !important;
+  align-items: center !important;
+  margin-top: 12px !important;
+}
+
+#cmmt-large-download-link,
+#cmmt-large-vtt-download-link,
+#cmsg-download-link,
+#cmsg-vtt-download-link {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  margin: 0 !important;
+  white-space: nowrap !important;
+}
+/* Crossmarket v2.8.7 Download Button UX */
+
+#cmmt-large-download-wrap,
+#cmsg-download-wrap,
+#cmmt-drive-download-wrap {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 14px !important;
+  align-items: center !important;
+  margin-top: 12px !important;
+}
+
+#cmmt-large-download-link,
+#cmmt-large-vtt-download-link,
+#cmsg-download-link,
+#cmsg-vtt-download-link {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  margin: 0 !important;
+  white-space: nowrap !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  pointer-events: auto !important;
+}
+
+#cmmt-large-download-link[href="#"],
+#cmmt-large-vtt-download-link[href="#"],
+#cmsg-download-link[href="#"],
+#cmsg-vtt-download-link[href="#"] {
+  display: none !important;
+}
+/* Hide inactive placeholder download buttons until real SRT/VTT URLs exist */
+#cmmt-large-download-link[href="#"],
+#cmmt-large-vtt-download-link[href="#"],
+#cmsg-download-link[href="#"],
+#cmsg-vtt-download-link[href="#"],
+#cmmt-drive-download-link[href="#"],
+#cmmt-drive-vtt-download-link[href="#"] {
+  display: none !important;
+}
+
+/* Make Google Drive payment instruction more visible */
+#cmmt-drive-status,
+.cmsg-drive-status,
+#cmsg-drive-status {
+  font-size: 16px !important;
+  font-weight: 700 !important;
+  padding: 14px 16px !important;
+  border-radius: 10px !important;
+  background: #fff7d6 !important;
+  border: 1px solid #e0b800 !important;
+  color: #3a2a00 !important;
+  margin: 14px 0 !important;
+}
+.cmsg-drive-warning {
+  margin: 12px 0;
+  padding: 14px 16px;
+  border: 1px solid #d99a00;
+  background: #fff6d8;
+  color: #3a2a00;
+  font-weight: 700;
+  border-radius: 10px;
+  line-height: 1.45;
+}
+
+.cmmt-estimate,
+#cmmt-large-estimate {
+  font-size: 13px;
+  font-weight: 500;
+  opacity: 0.82;
+  margin-top: 6px;
+}
+
+/* ===== Large Upload Order Summary ===== */
+
+#cmmt-large-estimate,
+.cmmt-order-total,
+.cmmt-estimate-amount {
+    font-size: 32px !important;
+    font-weight: 600 !important;
+    line-height: 1.1;
+    color: #111 !important;
+    display: block;
+    margin-top: 10px;
+}
+
+.cmmt-order-summary small,
+.cmmt-order-summary-note {
+    font-size: 12px;
+    opacity: 0.72;
+}
+
+.cmmt-order-summary {
+    padding: 14px 16px;
+    border-radius: 12px;
+    background: #f8f8f8;
+}
+
+/* ===== Make pre-upload billing message readable ===== */
+
+#cmmt-large-estimate {
+    color: #111 !important;
+    background: #fff !important;
+    opacity: 1 !important;
+    font-size: 16px !important;
+    font-weight: 700 !important;
+    line-height: 1.35 !important;
+    padding: 10px 12px !important;
+    border: 1px solid #d8d8d8 !important;
+    border-radius: 10px !important;
+    display: inline-block !important;
+    margin-top: 8px !important;
+    text-shadow: none !important;
+    filter: none !important;
+}
+/* ===== v3.0.1 Trailer Studio white-panel field label fix ===== */
+
+#cmmt-trailer-form label,
+#cmmt-trailer-form label > span,
+.cmmt-trailer-form label,
+.cmmt-trailer-form label > span,
+.cmmt-trailer-shell label,
+.cmmt-trailer-shell label > span {
+    display: block !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    color: #111827 !important;
+    -webkit-text-fill-color: #111827 !important;
+    font-size: 13px !important;
+    font-weight: 700 !important;
+    line-height: 1.35 !important;
+    margin-bottom: 8px !important;
+    text-shadow: none !important;
+    background: transparent !important;
+}
+
+#cmmt-trailer-form input,
+#cmmt-trailer-form textarea,
+#cmmt-trailer-form select,
+.cmmt-trailer-form input,
+.cmmt-trailer-form textarea,
+.cmmt-trailer-form select {
+    color: #111827 !important;
+    -webkit-text-fill-color: #111827 !important;
+    background: #ffffff !important;
+    font-size: 14px !important;
+    font-weight: 400 !important;
+    margin-top: 6px !important;
+}
+/* ===== v3.0.1 Trailer Studio professional layout fix ===== */
+
+.cmmt-trailer-shell {
+    max-width: 1180px !important;
+    margin: 32px auto !important;
+    padding: 28px !important;
+    border-radius: 18px !important;
+    background: #f9fafb !important;
+    box-shadow: 0 10px 28px rgba(0,0,0,0.08) !important;
+}
+
+.cmmt-trailer-hero {
+    margin-bottom: 24px !important;
+}
+
+#cmmt-trailer-form .cmsg-grid,
+.cmmt-trailer-form .cmsg-grid {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(280px, 1fr)) !important;
+    gap: 20px 24px !important;
+    align-items: start !important;
+}
+
+#cmmt-trailer-form label,
+.cmmt-trailer-form label {
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    box-sizing: border-box !important;
+}
+
+#cmmt-trailer-form label.cmsg-file,
+.cmmt-trailer-form label.cmsg-file {
+    grid-column: 1 / -1 !important;
+}
+
+#cmmt-trailer-form input,
+#cmmt-trailer-form select,
+#cmmt-trailer-form textarea,
+.cmmt-trailer-form input,
+.cmmt-trailer-form select,
+.cmmt-trailer-form textarea {
+    width: 100% !important;
+    box-sizing: border-box !important;
+    min-height: 46px !important;
+    border-radius: 10px !important;
+    border: 1px solid #d1d5db !important;
+    padding: 11px 13px !important;
+    margin: 0 !important;
+}
+
+#cmmt-trailer-form textarea,
+.cmmt-trailer-form textarea {
+    min-height: 130px !important;
+    resize: vertical !important;
+}
+
+.cmmt-trailer-brief-preview,
+#cmmt-trailer-brief-preview,
+.cmsg-order-summary,
+.cmsg-paywall,
+.cmsg-actions {
+    margin-top: 22px !important;
+}
+
+@media (max-width: 760px) {
+    #cmmt-trailer-form .cmsg-grid,
+    .cmmt-trailer-form .cmsg-grid {
+        grid-template-columns: 1fr !important;
+    }
+
+    .cmmt-trailer-shell {
+        padding: 18px !important;
+        margin: 18px auto !important;
+    }
+.cmmt-language-note {
+    display: block !important;
+    margin-top: 6px !important;
+    color: #6b7280 !important;
+    font-size: 12px !important;
+    line-height: 1.4 !important;
+    font-weight: 500 !important;
+}
+/* ===== v3.0.1 Dashboard module header visibility fix ===== */
+
+.cmmt-dashboard h1,
+.cmmt-dashboard h2,
+.cmmt-dashboard h3,
+.cmmt-dashboard .cmsg-card-head h1,
+.cmmt-dashboard .cmsg-card-head h2,
+.cmmt-dashboard .cmsg-card-head h3,
+.cmsg-card-head h1,
+.cmsg-card-head h2,
+.cmsg-card-head h3,
+.cmsg-source-card h3,
+.cmsg-source-card span,
+.cmsg-source-card p {
+    display: block !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    color: #111827 !important;
+    -webkit-text-fill-color: #111827 !important;
+    text-shadow: none !important;
+}
+
+.cmmt-dashboard .cmsg-card-head,
+.cmsg-card-head,
+.cmsg-source-card {
+    color: #111827 !important;
+    -webkit-text-fill-color: #111827 !important;
+}
+/* ===== Force module tiles/header text visible ===== */
+
+.cmsg-source-card,
+.cmsg-source-card * {
+    visibility: visible !important;
+    opacity: 1 !important;
+}
+
+.cmsg-source-card h3,
+.cmsg-source-card h3 *,
+.cmsg-source-card p,
+.cmsg-source-card span {
+    color: #111827 !important;
+    -webkit-text-fill-color: #111827 !important;
+    background: transparent !important;
+    text-shadow: none !important;
+    font-weight: 800 !important;
+}
+
+.cmsg-source-card {
+    background: #ffffff !important;
+    border: 1px solid rgba(17,24,39,0.14) !important;
+}
+/* ===== v3.0.1 Main dashboard card header visibility fix ===== */
+
+.cmmt-card,
+.cmmt-card * {
+    visibility: visible !important;
+    opacity: 1 !important;
+}
+
+.cmmt-card h3,
+.cmmt-card > h3 {
+    display: block !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    color: #111827 !important;
+    -webkit-text-fill-color: #111827 !important;
+    background: transparent !important;
+    text-shadow: none !important;
+    font-size: 24px !important;
+    line-height: 1.25 !important;
+    font-weight: 900 !important;
+    margin: 0 0 10px 0 !important;
+    padding: 0 !important;
+}
+
+.cmmt-card > p {
+    display: block !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    color: #374151 !important;
+    -webkit-text-fill-color: #374151 !important;
+    font-size: 15px !important;
+    line-height: 1.55 !important;
+    margin: 0 0 18px 0 !important;
+}
+/* ===== v3.0.1 Global studio text visibility repair ===== */
+
+/* Subtitle workflow header */
+.cmmt-dashboard h2,
+.cmmt-dashboard h3,
+.cmmt-dashboard h4,
+.cmmt-dashboard p,
+.cmmt-dashboard span,
+.cmmt-dashboard strong,
+.cmsg-card h2,
+.cmsg-card h3,
+.cmsg-card h4,
+.cmsg-card p,
+.cmsg-card span,
+.cmsg-card strong {
+    visibility: visible !important;
+    opacity: 1 !important;
+    text-shadow: none !important;
+}
+
+/* Workflow selection text */
+.cmsg-card-head h3,
+.cmsg-card-head p,
+.cmsg-tab-head h3,
+.cmsg-tab-head p,
+.cmmt-workflow-head h3,
+.cmmt-workflow-head p {
+    color: #111827 !important;
+    -webkit-text-fill-color: #111827 !important;
+}
+
+/* Poster Studio heading and intro */
+.cmmt-poster-shell h2,
+.cmmt-poster-shell h3,
+.cmmt-poster-shell h4,
+.cmmt-poster-shell p,
+.cmmt-poster-shell span,
+.cmmt-poster-shell strong,
+#cmmt-poster-form h2,
+#cmmt-poster-form h3,
+#cmmt-poster-form h4,
+#cmmt-poster-form p,
+#cmmt-poster-form span,
+#cmmt-poster-form strong {
+    color: #111827 !important;
+    -webkit-text-fill-color: #111827 !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    text-shadow: none !important;
+}
+
+/* Poster step labels: 1 Creative Brief, 2 Upload References, etc. */
+.cmmt-poster-steps,
+.cmmt-poster-steps *,
+.cmsg-steps,
+.cmsg-steps *,
+.cmmt-step,
+.cmmt-step *,
+.cmsg-step,
+.cmsg-step * {
+    color: #111827 !important;
+    -webkit-text-fill-color: #111827 !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    text-shadow: none !important;
+}
+
+/* Step number circles */
+.cmmt-step-number,
+.cmsg-step-number,
+.cmmt-poster-step-number {
+    background: #111827 !important;
+    color: #ffffff !important;
+    -webkit-text-fill-color: #ffffff !important;
+    border: 1px solid #111827 !important;
+    font-weight: 900 !important;
+
+}
+/* ===== v3.0.1 Exact Subtitle + Poster header repair ===== */
+
+/* Subtitle Studio workflow header in upload-form.php */
+.cmmt-workflow-panel h2,
+.cmmt-workflow-panel p,
+.cmmt-workflow-panel span,
+.cmmt-workflow-panel strong,
+.cmsg-workflow-panel h2,
+.cmsg-workflow-panel p,
+.cmsg-workflow-panel span,
+.cmsg-workflow-panel strong,
+.cmsg-card h2,
+.cmsg-card > p {
+    display: block !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    color: #111827 !important;
+    -webkit-text-fill-color: #111827 !important;
+    text-shadow: none !important;
+}
+
+/* Poster Studio top heading */
+.cmmt-poster-shell h2,
+.cmmt-poster-shell > p,
+.cmmt-poster-shell .cmsg-kicker,
+.cmsg-poster-shell h2,
+.cmsg-poster-shell > p {
+    display: block !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    color: #111827 !important;
+    -webkit-text-fill-color: #111827 !important;
+    text-shadow: none !important;
+}
+
+/* Poster form exact step list */
+.cmmt-poster-shell ol,
+.cmmt-poster-shell ol li,
+.cmmt-poster-shell ol li span,
+.cmmt-poster-shell ol li strong,
+#cmmt-poster-form ol,
+#cmmt-poster-form ol li,
+#cmmt-poster-form ol li span,
+#cmmt-poster-form ol li strong,
+ol.cmmt-poster-steps,
+ol.cmmt-poster-steps li,
+ol.cmmt-poster-steps li span,
+ol.cmmt-poster-steps li strong {
+    display: inline-flex !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    color: #111827 !important;
+    -webkit-text-fill-color: #111827 !important;
+    text-shadow: none !important;
+    font-weight: 800 !important;
+}
+
+/* Step number bubbles */
+.cmmt-poster-shell ol li span,
+#cmmt-poster-form ol li span,
+ol.cmmt-poster-steps li span {
+    align-items: center !important;
+    justify-content: center !important;
+    background: #111827 !important;
+    color: #ffffff !important;
+    -webkit-text-fill-color: #ffffff !important;
+    border-radius: 999px !important;
+    width: 28px !important;
+    height: 28px !important;
+    min-width: 28px !important;
+    margin-right: 8px !important;
+}
+}
