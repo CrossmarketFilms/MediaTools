@@ -1066,22 +1066,49 @@ private static function resize_final_from_selected_preview($src, $dest, $target_
 
     $canvas = imagecreatetruecolor($target_w, $target_h);
 
-    // Cover/crop selected clean preview edge-to-edge. No letterboxing.
-    $scale = max($target_w / $src_w, $target_h / $src_h);
-    $new_w = (int)ceil($src_w * $scale);
-    $new_h = (int)ceil($src_h * $scale);
+    // Fill the canvas edge-to-edge with a cover crop from the selected preview.
+    // Then place a protected foreground copy from the same preview so key faces
+    // are not cut off when square previews export to portrait or banner formats.
+    $cover_scale = max($target_w / $src_w, $target_h / $src_h);
+    $cover_w = (int)ceil($src_w * $cover_scale);
+    $cover_h = (int)ceil($src_h * $cover_scale);
 
-    $dst_x = (int)floor(($target_w - $new_w) / 2);
-    $dst_y = (int)floor(($target_h - $new_h) / 2);
+    $cover_x = (int)floor(($target_w - $cover_w) / 2);
+    $cover_y = (int)floor(($target_h - $cover_h) / 2);
 
-    // Portrait finals usually carry faces in the upper/middle key-art area.
-    // Bias the crop slightly upward while still covering the full canvas.
     $aspect = $target_w / max(1, $target_h);
-    if ($aspect < 0.8 && $new_h > $target_h) {
-        $dst_y = (int)floor(($target_h - $new_h) * 0.42);
+    if ($aspect > 1.3 && $cover_h > $target_h) {
+        $cover_y = 0;
+    } elseif ($aspect < 0.8 && $cover_w > $target_w) {
+        $cover_x = (int)floor(($target_w - $cover_w) / 2);
     }
 
-    imagecopyresampled($canvas, $img, $dst_x, $dst_y, 0, 0, $new_w, $new_h, $src_w, $src_h);
+    imagecopyresampled($canvas, $img, $cover_x, $cover_y, 0, 0, $cover_w, $cover_h, $src_w, $src_h);
+
+    if (function_exists('imagefilter')) {
+        imagefilter($canvas, IMG_FILTER_GAUSSIAN_BLUR);
+        imagefilter($canvas, IMG_FILTER_BRIGHTNESS, -18);
+        imagefilter($canvas, IMG_FILTER_CONTRAST, -8);
+    }
+
+    $foreground_scale = min(
+        ($target_w * 0.98) / $src_w,
+        ($target_h * ($aspect > 1.3 ? 0.96 : 0.82)) / $src_h
+    );
+
+    $foreground_w = (int)floor($src_w * $foreground_scale);
+    $foreground_h = (int)floor($src_h * $foreground_scale);
+    $foreground_x = (int)floor(($target_w - $foreground_w) / 2);
+
+    if ($aspect > 1.3) {
+        $foreground_y = (int)floor(($target_h - $foreground_h) * 0.22);
+    } elseif ($aspect < 0.8) {
+        $foreground_y = (int)floor($target_h * 0.04);
+    } else {
+        $foreground_y = (int)floor(($target_h - $foreground_h) / 2);
+    }
+
+    imagecopyresampled($canvas, $img, $foreground_x, $foreground_y, 0, 0, $foreground_w, $foreground_h, $src_w, $src_h);
 
     imagepng($canvas, $dest, 9);
 
