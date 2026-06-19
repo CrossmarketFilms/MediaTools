@@ -1051,7 +1051,45 @@ private static function resize_canvas_png($src, $dest, $target_w, $target_h, $br
 }
 
 private static function resize_final_from_selected_preview($src, $dest, $target_w, $target_h, $brief, $cfg = []) {
-    return self::resize_canvas_png($src, $dest, $target_w, $target_h, $brief, $cfg);
+    if (!function_exists('imagecreatefrompng') || !file_exists($src)) return false;
+
+    $img = imagecreatefrompng($src);
+    if (!$img) return false;
+
+    $src_w = imagesx($img);
+    $src_h = imagesy($img);
+
+    if ($src_w <= 0 || $src_h <= 0 || $target_w <= 0 || $target_h <= 0) {
+        imagedestroy($img);
+        return false;
+    }
+
+    $canvas = imagecreatetruecolor($target_w, $target_h);
+
+    // Cover/crop selected clean preview edge-to-edge. No letterboxing.
+    $scale = max($target_w / $src_w, $target_h / $src_h);
+    $new_w = (int)ceil($src_w * $scale);
+    $new_h = (int)ceil($src_h * $scale);
+
+    $dst_x = (int)floor(($target_w - $new_w) / 2);
+    $dst_y = (int)floor(($target_h - $new_h) / 2);
+
+    // Portrait finals usually carry faces in the upper/middle key-art area.
+    // Bias the crop slightly upward while still covering the full canvas.
+    $aspect = $target_w / max(1, $target_h);
+    if ($aspect < 0.8 && $new_h > $target_h) {
+        $dst_y = (int)floor(($target_h - $new_h) * 0.42);
+    }
+
+    imagecopyresampled($canvas, $img, $dst_x, $dst_y, 0, 0, $new_w, $new_h, $src_w, $src_h);
+
+    imagepng($canvas, $dest, 9);
+
+    imagedestroy($img);
+    imagedestroy($canvas);
+
+    self::overlay_title_and_tagline($dest, $brief, $target_w, $target_h, $cfg);
+    return true;
 }
 
 private static function resize_final_native_png($src, $dest, $target_w, $target_h, $brief, $cfg = []) {
