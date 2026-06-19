@@ -70,7 +70,7 @@ STRICT BACKGROUND-ONLY RULES:
             $variant_text = 'Final output: create a native landscape banner composition for 896x504. Use the selected preview as the exact design reference. Preserve the same cast, mood, layout, color palette, and concept. Recompose naturally for wide horizontal format with all actor faces fully visible. Do not crop heads or faces. Leave clean lower-center title-safe space.';
         }
 
-        return "Create a high-end cinematic movie poster background/key art concept.\n\n"
+        return "Create a high-end cinematic movie poster key art concept.\n\n"
             . "POSTER PROJECT NAME: {$title}\nGENRE: {$genre}\nMOOD: {$mood}\nSTYLE PRESET: {$style}\n"
             . "TYPOGRAPHY RULE: Do NOT render the movie title, tagline, credits, or any readable text inside the artwork. The plugin  will overlay final typography after generation. Leave clean empty title-safe space.\n"
             . "\nPOSTER SCENE DIRECTION:\n{$description}\n\n"
@@ -109,7 +109,7 @@ STRICT BACKGROUND-ONLY RULES:
             . "- Keep all major composition elements inside center-safe boundaries\n"
             . "- For 1280x720 landscape/banner posters, preserve strong left/right and top/bottom safe padding\n"
             . "- For 1080x1920 vertical posters, preserve strong left/right and top/bottom safe padding\n"
-            . "- Generate background/key art only, without final typography\n"
+            . "- Generate finished cinematic key art without final typography\n"
             . "- Absolutely no readable movie title text inside the generated image\n"
             . "- Absolutely no tagline text inside the generated image\n"
             . "- No fake poster credits or random typography\n"
@@ -312,26 +312,18 @@ private static function generate_image_file($brief, $id, $prefix, $variant, $ind
 
     $cast_assets = self::cast_actor_assets($brief);
 
-    /*
-     * Generate a clean background plate when cast uploads exist. The uploaded
-     * actor pixels are composited afterward, so the image model should not invent
-     * replacement cast members or fake poster typography.
-     */
-    $prompt_brief = $brief;
+    $prompt = self::build_prompt($brief, $variant);
+
     if (!empty($cast_assets)) {
-        $prompt_brief['background_only'] = true;
+        $prompt .= "\n\nINTEGRATED MOVIE POSTER COMPOSITION:\n";
+        $prompt .= "- Use the uploaded Principal Cast photos as identity and character references.\n";
+        $prompt .= "- Create a finished cinematic poster, not a background plate and not pasted photo cutouts.\n";
+        $prompt .= "- Integrate the cast into one coherent theatrical key-art composition with matching lighting, color grade, shadows, atmosphere, and depth.\n";
+        $prompt .= "- Follow the Poster Scene Direction for actor placement and emotional relationships.\n";
+        $prompt .= "- Preserve recognizable likeness while rendering the cast as part of a polished movie poster.\n";
+        $prompt .= "- Do not include hard rectangular photo edges, white halos, grey mattes, raw cutout borders, screenshots, or collage artifacts.\n";
+        $prompt .= "- Do not render the movie title or readable text; the plugin overlays title typography later.\n";
     }
-
-    $prompt = self::build_prompt($prompt_brief, $variant);
-
-    $prompt .= "\n\nBACKGROUND-ONLY GENERATION:\n";
-    $prompt .= "- Do not generate actor faces, portraits, or human closeups.\n";
-    $prompt .= "- Do not invent replacement cast members.\n";
-    $prompt .= "- Create only cinematic background, lighting, atmosphere, environment, props, and composition.\n";
-    $prompt .= "- Leave clear subject placement space for real actor photo compositing.\n";
-    $prompt .= "- Keep the center and upper-middle area clean enough for actor cutouts.\n";
-    $prompt .= "- ABSOLUTELY NO humans, faces, heads, bodies, silhouettes, portraits, actors, crowds, or people.\n";
-    $prompt .= "- Environment plate only. Empty cinematic background only.\n";
 
 
     $response = self::has_reference_images($brief)
@@ -363,13 +355,9 @@ private static function generate_image_file($brief, $id, $prefix, $variant, $ind
 
 error_log('CMSG CAST FACE MAP CHECK: cast1=' . ($brief['cast_actor_1'] ?? 'none') . ' cast2=' . ($brief['cast_actor_2'] ?? 'none') . ' cast3=' . ($brief['cast_actor_3'] ?? 'none'));
 
-    /*
-     * Composite real actor assets onto generated background.
-     * This preserves real facial features better than asking AI to recreate faces.
-     */
    error_log('CMSG POSTER COMPOSITE CHECK: cast_assets=' . count($cast_assets) . ' path=' . $path);
 
-    if (!empty($cast_assets)) {
+    if (!empty($cast_assets) && !self::has_reference_images($brief)) {
         self::composite_actor_assets($path, $cast_assets, $variant, $brief);
     }
 
@@ -952,6 +940,13 @@ if (!empty($brief['style_reference'])) {
     if ($normalized) $add_file('image[]', $normalized);
 }
 error_log('CMSG POSTER STYLE REF: ' . (!empty($brief['style_reference']) ? $brief['style_reference'] : 'none'));
+foreach (['cast_actor_1', 'cast_actor_2', 'cast_actor_3'] as $cast_key) {
+    if (!empty($brief[$cast_key])) {
+        $normalized = self::normalize_reference_image_for_openai($brief[$cast_key]);
+        if ($normalized) $add_file('image[]', $normalized);
+    }
+}
+error_log('CMSG POSTER CAST REF COUNT: ' . count(self::cast_actor_assets($brief)));
 error_log('CMSG POSTER ASSET COUNT: ' . count($brief['poster_assets'] ?? [])); 
 
 if (!empty($brief['poster_assets']) && is_array($brief['poster_assets'])) {
@@ -989,6 +984,10 @@ private static function is_valid_openai_image($path) {
 
 private static function has_reference_images($brief) {
     if (!empty($brief['style_reference']) && self::is_valid_openai_image($brief['style_reference'])) return true;
+
+    foreach (['cast_actor_1', 'cast_actor_2', 'cast_actor_3'] as $cast_key) {
+        if (!empty($brief[$cast_key]) && self::is_valid_openai_image($brief[$cast_key])) return true;
+    }
 
     if (!empty($brief['poster_assets']) && is_array($brief['poster_assets'])) {
         foreach ($brief['poster_assets'] as $asset) {
