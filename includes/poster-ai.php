@@ -370,7 +370,7 @@ error_log('CMSG CAST FACE MAP CHECK: cast1=' . ($brief['cast_actor_1'] ?? 'none'
    error_log('CMSG POSTER COMPOSITE CHECK: cast_assets=' . count($cast_assets) . ' path=' . $path);
 
     if (!empty($cast_assets)) {
-        self::composite_actor_assets($path, $cast_assets, $variant);
+        self::composite_actor_assets($path, $cast_assets, $variant, $brief);
     }
 
     if ($watermark) self::apply_watermark($path);
@@ -431,14 +431,86 @@ private static function remove_actor_background($asset_path) {
 }
 
 
-private static function composite_actor_assets($background_path, $assets, $variant = '') {
+private static function actor_layout_slots($brief, $count, $variant = '') {
+    $scene = strtolower((string)($brief['poster_description'] ?? ''));
+    $notes = [
+        strtolower((string)($brief['cast_actor_1_instruction'] ?? '')),
+        strtolower((string)($brief['cast_actor_2_instruction'] ?? '')),
+        strtolower((string)($brief['cast_actor_3_instruction'] ?? '')),
+    ];
+
+    if ($variant === 'banner') {
+        $slots = [
+            ['x' => 0.30, 'h' => 0.64, 'bottom' => 0.88],
+            ['x' => 0.70, 'h' => 0.64, 'bottom' => 0.88],
+            ['x' => 0.44, 'h' => 0.56, 'bottom' => 0.88],
+        ];
+    } elseif ($count === 1) {
+        $slots = [
+            ['x' => 0.50, 'h' => 0.62, 'bottom' => 0.70],
+        ];
+    } elseif ($count === 2) {
+        $slots = [
+            ['x' => 0.34, 'h' => 0.58, 'bottom' => 0.70],
+            ['x' => 0.66, 'h' => 0.58, 'bottom' => 0.70],
+        ];
+    } else {
+        $slots = [
+            ['x' => 0.26, 'h' => 0.52, 'bottom' => 0.70],
+            ['x' => 0.74, 'h' => 0.52, 'bottom' => 0.70],
+            ['x' => 0.42, 'h' => 0.48, 'bottom' => 0.66],
+        ];
+    }
+
+    for ($i = 0; $i < $count; $i++) {
+        $note = $notes[$i] ?? '';
+        $role_text = $note !== '' ? $note : 'actor ' . ($i + 1);
+
+        if (self::actor_text_has($role_text, ['father', 'dad', 'husband']) && strpos($scene, 'father') !== false && strpos($scene, 'left') !== false) {
+            $slots[$i]['x'] = 0.27;
+        }
+
+        if (self::actor_text_has($role_text, ['daughter', 'girl', 'child']) && strpos($scene, 'daughter') !== false && strpos($scene, 'right') !== false) {
+            $slots[$i]['x'] = 0.73;
+        }
+
+        if (self::actor_text_has($role_text, ['mother', 'mom', 'wife']) && strpos($scene, 'mother') !== false && strpos($scene, 'father') !== false && strpos($scene, 'same side') !== false) {
+            $slots[$i]['x'] = 0.43;
+            $slots[$i]['h'] = min($slots[$i]['h'], 0.48);
+        }
+
+        if (strpos($note, 'left') !== false) {
+            $slots[$i]['x'] = min($slots[$i]['x'], 0.32);
+        } elseif (strpos($note, 'right') !== false) {
+            $slots[$i]['x'] = max($slots[$i]['x'], 0.68);
+        } elseif (strpos($note, 'center') !== false || strpos($note, 'middle') !== false) {
+            $slots[$i]['x'] = 0.50;
+        }
+
+        if (strpos($note, 'background') !== false || strpos($note, 'behind') !== false || strpos($note, 'shadows') !== false) {
+            $slots[$i]['h'] = min($slots[$i]['h'], 0.46);
+            $slots[$i]['bottom'] = min($slots[$i]['bottom'], 0.64);
+        }
+    }
+
+    return $slots;
+}
+
+private static function actor_text_has($text, $needles) {
+    foreach ($needles as $needle) {
+        if (strpos($text, $needle) !== false) return true;
+    }
+    return false;
+}
+
+private static function composite_actor_assets($background_path, $assets, $variant = '', $brief = []) {
     if (!file_exists($background_path) || empty($assets) || !is_array($assets)) {
         return false;
     }
 
     if (!extension_loaded('imagick')) {
-        error_log('CMSG POSTER COMPOSITE: Imagick extension not loaded. Using GD fallback.');
-        return self::gd_composite_actor_assets($background_path, $assets, $variant);
+        error_log('CMSG POSTER COMPOSITE: Imagick extension not loaded. Using GD portrait fallback.');
+        return self::gd_composite_actor_assets($background_path, $assets, $variant, null, 0, $brief);
     }
 
     try {
@@ -459,6 +531,7 @@ error_log('CMSG POSTER COMPOSITE VALID: valid_assets=' . count($valid_assets));
         }
 
         $count = count($valid_assets);
+        $layout_slots = self::actor_layout_slots($brief, $count, $variant);
         $max_actor_h = (int) round($canvas_h * 0.62);
 
         foreach ($valid_assets as $i => $asset_path) {
@@ -467,7 +540,7 @@ error_log('CMSG POSTER CUTOUT PATH: ' . $cutout_path);
 
 if (!$cutout_path || !file_exists($cutout_path)) {
     error_log('CMSG POSTER COMPOSITE: background removal failed for ' . $asset_path);
-    self::gd_composite_actor_assets($background_path, [$asset_path], $variant, $count, $i);
+    self::gd_composite_actor_assets($background_path, [$asset_path], $variant, $count, $i, $brief);
     continue;
 }
 
@@ -511,19 +584,10 @@ $actor = new Imagick($cutout_path);
  */
 
 $title_safe_y = (int) round($canvas_h * 0.66);
-$actor_bottom = $title_safe_y;
-
-if ($count === 1) {
-    $target_h = (int) round($canvas_h * 0.62);
-    $x_ratio = 0.50;
-} elseif ($count === 2) {
-    $target_h = (int) round($canvas_h * 0.56);
-    $x_ratio = ($i === 0) ? 0.32 : 0.68;
-} else {
-    $target_h = (int) round($canvas_h * 0.48);
-    $x_slots = [0.24, 0.50, 0.76, 0.36, 0.64];
-    $x_ratio = $x_slots[$i] ?? 0.50;
-}
+$slot = $layout_slots[$i] ?? ['x' => 0.50, 'h' => 0.50, 'bottom' => 0.70];
+$actor_bottom = min($title_safe_y, (int) round($canvas_h * (float)$slot['bottom']));
+$target_h = (int) round($canvas_h * (float)$slot['h']);
+$x_ratio = (float)$slot['x'];
 
 $scale = $target_h / $actor_h;
 $new_w = max(1, (int) round($actor_w * $scale));
@@ -605,7 +669,7 @@ private static function gd_load_image($path) {
     return null;
 }
 
-private static function gd_composite_actor_assets($background_path, $assets, $variant = '', $total_count = null, $slot_offset = 0) {
+private static function gd_composite_actor_assets($background_path, $assets, $variant = '', $total_count = null, $slot_offset = 0, $brief = []) {
     if (!function_exists('imagecreatefrompng') || !function_exists('imagecopyresampled')) return false;
     if (!file_exists($background_path) || empty($assets) || !is_array($assets)) return false;
 
@@ -627,6 +691,7 @@ private static function gd_composite_actor_assets($background_path, $assets, $va
     }
 
     $count = $total_count ? (int)$total_count : count($valid_assets);
+    $layout_slots = self::actor_layout_slots($brief, $count, $variant);
     $drawn = 0;
 
     foreach ($valid_assets as $local_i => $asset_path) {
@@ -641,29 +706,15 @@ private static function gd_composite_actor_assets($background_path, $assets, $va
             continue;
         }
 
-        if ($variant === 'banner') {
-            $target_h = (int)round($canvas_h * 0.50);
-            $x_slots = [0.25, 0.50, 0.75, 0.36, 0.64];
-            $bottom_y = (int)round($canvas_h * 0.82);
-        } elseif ($count === 1) {
-            $target_h = (int)round($canvas_h * 0.58);
-            $x_slots = [0.50];
-            $bottom_y = (int)round($canvas_h * 0.72);
-        } elseif ($count === 2) {
-            $target_h = (int)round($canvas_h * 0.50);
-            $x_slots = [0.34, 0.66];
-            $bottom_y = (int)round($canvas_h * 0.72);
-        } else {
-            $target_h = (int)round($canvas_h * 0.43);
-            $x_slots = [0.24, 0.50, 0.76, 0.36, 0.64];
-            $bottom_y = (int)round($canvas_h * 0.72);
-        }
+        $slot = $layout_slots[$i] ?? ['x' => 0.50, 'h' => 0.50, 'bottom' => 0.70];
+        $target_h = (int)round($canvas_h * (float)$slot['h']);
+        $bottom_y = (int)round($canvas_h * (float)$slot['bottom']);
 
         $scale = $target_h / $actor_h;
         $target_w = max(1, (int)round($actor_w * $scale));
         $target_h = max(1, (int)round($actor_h * $scale));
 
-        $x_ratio = $x_slots[$i] ?? 0.50;
+        $x_ratio = (float)$slot['x'];
         $x = (int)round(($canvas_w * $x_ratio) - ($target_w / 2));
         $y = (int)round($bottom_y - $target_h);
 
@@ -680,7 +731,7 @@ private static function gd_composite_actor_assets($background_path, $assets, $va
             $shadow
         );
 
-        imagecopyresampled($canvas, $actor, $x, $y, 0, 0, $target_w, $target_h, $actor_w, $actor_h);
+        self::gd_copy_soft_portrait($canvas, $actor, $x, $y, $target_w, $target_h, $actor_w, $actor_h);
         imagedestroy($actor);
         $drawn++;
 
@@ -694,6 +745,47 @@ private static function gd_composite_actor_assets($background_path, $assets, $va
 
     imagedestroy($canvas);
     return $drawn > 0;
+}
+
+private static function gd_copy_soft_portrait($canvas, $actor, $x, $y, $target_w, $target_h, $actor_w, $actor_h) {
+    $layer = imagecreatetruecolor($target_w, $target_h);
+    imagealphablending($layer, false);
+    imagesavealpha($layer, true);
+    $transparent = imagecolorallocatealpha($layer, 0, 0, 0, 127);
+    imagefilledrectangle($layer, 0, 0, $target_w, $target_h, $transparent);
+    imagecopyresampled($layer, $actor, 0, 0, 0, 0, $target_w, $target_h, $actor_w, $actor_h);
+
+    for ($py = 0; $py < $target_h; $py++) {
+        $ny = ($py / max(1, $target_h)) - 0.46;
+        for ($px = 0; $px < $target_w; $px++) {
+            $nx = ($px / max(1, $target_w)) - 0.50;
+            $ellipse = sqrt(($nx * $nx) / (0.52 * 0.52) + ($ny * $ny) / (0.62 * 0.62));
+            $edge = 1.0;
+            if ($ellipse > 0.82) {
+                $edge = max(0.0, min(1.0, (1.0 - $ellipse) / 0.18));
+            }
+
+            $bottom = 1.0;
+            $bottom_start = (int)round($target_h * 0.76);
+            if ($py > $bottom_start) {
+                $bottom = max(0.0, 1.0 - (($py - $bottom_start) / max(1, $target_h - $bottom_start)));
+            }
+
+            $mask = $edge * max(0.18, $bottom);
+            $rgba = imagecolorat($layer, $px, $py);
+            $a = ($rgba >> 24) & 0x7F;
+            $r = ($rgba >> 16) & 0xFF;
+            $g = ($rgba >> 8) & 0xFF;
+            $b = $rgba & 0xFF;
+            $final_a = 127 - (int)round((127 - $a) * $mask);
+            $color = imagecolorallocatealpha($layer, $r, $g, $b, max(0, min(127, $final_a)));
+            imagesetpixel($layer, $px, $py, $color);
+        }
+    }
+
+    imagealphablending($canvas, true);
+    imagecopy($canvas, $layer, $x, $y, 0, 0, $target_w, $target_h);
+    imagedestroy($layer);
 }
 
 /*
