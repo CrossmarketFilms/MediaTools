@@ -8,8 +8,10 @@ final class CMSG_Poster_AI {
         $mood = sanitize_text_field($brief['mood'] ?? 'premium');
         $tagline = sanitize_text_field($brief['tagline'] ?? '');
         $description = trim((string)($brief['poster_description'] ?? ''));
+        if ($description === '' && !empty($brief['cast_scene_instruction'])) {
+            $description = trim((string)$brief['cast_scene_instruction']);
+        }
 
-        $cast_scene_instruction = trim((string)($brief['cast_scene_instruction'] ?? ''));
         $cast_actor_1_instruction = trim((string)($brief['cast_actor_1_instruction'] ?? ''));
         $cast_actor_2_instruction = trim((string)($brief['cast_actor_2_instruction'] ?? ''));
         $cast_actor_3_instruction = trim((string)($brief['cast_actor_3_instruction'] ?? ''));
@@ -27,14 +29,11 @@ GENRE: {$genre}
 MOOD: {$mood}
 STYLE PRESET: {$style}
 
-CREATIVE DIRECTION:
+POSTER SCENE DIRECTION:
 {$description}
 
-CAST BUILDER INSTRUCTIONS:
-" . (!empty($cast_actor_1_instruction) ? "Actor 1: {$cast_actor_1_instruction}\n" : '') . "
-" . (!empty($cast_actor_2_instruction) ? "Actor 2: {$cast_actor_2_instruction}\n" : '') . "
-" . (!empty($cast_actor_3_instruction) ? "Actor 3: {$cast_actor_3_instruction}\n" : '') . "
-" . (!empty($cast_scene_instruction) ? "Overall Scene: {$cast_scene_instruction}\n" : '') . "
+PRINCIPAL CAST ROLE / CHARACTER NOTES:
+" . (!empty($cast_actor_1_instruction) ? "Actor 1: {$cast_actor_1_instruction}\n" : '') . (!empty($cast_actor_2_instruction) ? "Actor 2: {$cast_actor_2_instruction}\n" : '') . (!empty($cast_actor_3_instruction) ? "Actor 3: {$cast_actor_3_instruction}\n" : '') . "
 
 
 STRICT BACKGROUND-ONLY RULES:
@@ -74,11 +73,16 @@ STRICT BACKGROUND-ONLY RULES:
         return "Create a high-end cinematic movie poster background/key art concept.\n\n"
             . "POSTER PROJECT NAME: {$title}\nGENRE: {$genre}\nMOOD: {$mood}\nSTYLE PRESET: {$style}\n"
             . "TYPOGRAPHY RULE: Do NOT render the movie title, tagline, credits, or any readable text inside the artwork. The plugin  will overlay final typography after generation. Leave clean empty title-safe space.\n"
-            . "\nCREATIVE DIRECTION:\n{$description}\n\n"
+            . "\nPOSTER SCENE DIRECTION:\n{$description}\n\n"
+            . "PRINCIPAL CAST ROLE / CHARACTER NOTES:\n"
+            . (!empty($cast_actor_1_instruction) ? "- Actor 1: {$cast_actor_1_instruction}\n" : '')
+            . (!empty($cast_actor_2_instruction) ? "- Actor 2: {$cast_actor_2_instruction}\n" : '')
+            . (!empty($cast_actor_3_instruction) ? "- Actor 3: {$cast_actor_3_instruction}\n" : '')
+            . "\n"
             . "REFERENCE INPUTS:\n"
             . ($has_style_reference ? "- A style reference image is provided. Use it ONLY for mood, lighting, composition, palette, typography placement, and cinematic design language. Do NOT copy faces, people, actors, logos, or text from the style reference. Actor identity must come only from poster asset images.\n" : '')
             . ($asset_count > 0
-              ? "- {$asset_count} poster asset image(s) are provided. Treat any uploaded human faces as REQUIRED CAST IDENTITY REFERENCES, not optional inspiration. Preserve their recognizable likeness, facial structure, gender presentation, skin tone, age range, facial hair, hairstyle, and distinctive features.\n"
+              ? "- {$asset_count} props/logos/visual reference image(s) are provided. Treat them as non-human visual references for objects, symbols, products, vehicles, buildings, logos, props, palette, and atmosphere. Do not treat these as actor photos or cast identity sources.\n"
               : '') 
             . (
                  !empty($brief['preserve_identity'])
@@ -221,29 +225,29 @@ public static function generate_final_files($brief, $job_id, $selected_concept =
         ],
     ];
 
-    $selected_preview_path = $brief['selected_preview_path'] ?? '';
-
-    $clean_candidate = str_replace('poster-ai-preview-', 'poster-ai-preview-clean-', $selected_preview_path);
-
-    if (file_exists($clean_candidate)) {
-        $selected_preview_path = $clean_candidate;
-    }
+    $selected_display_path = $brief['selected_preview_path'] ?? '';
+    $selected_preview_path = self::resolve_selected_preview_source($selected_display_path);
 
     if (empty($selected_preview_path) || !file_exists($selected_preview_path)) {
+        error_log('CMSG POSTER FINAL SOURCE MISSING: selected=' . $selected_display_path . ' resolved=' . $selected_preview_path);
         return $files;
     }
+
+    error_log('CMSG POSTER FINAL SOURCE: selected=' . $selected_display_path . ' resolved=' . $selected_preview_path);
+
+    $source_copy = trailingslashit($dir) . $slug . '-' . intval($job_id) . '-selected-source.png';
+    @copy($selected_preview_path, $source_copy);
+    @chmod($source_copy, 0664);
+
 foreach ($variant_map as $key => $cfg) {
     $out = trailingslashit($dir) . $slug . '-' . intval($job_id) . '-' . $key . '.png';
 
-    $final_brief = $brief;
-    $final_brief['style_reference'] = $selected_preview_path;
-    $final_brief['poster_assets'] = [];
-
-    $generated = self::generate_image_file($final_brief, $job_id, 'final', $cfg['prompt'], 1, false);
-
-if ($generated && file_exists($generated)) {
-    self::resize_final_native_png($generated, $out, $cfg['w'], $cfg['h'], $brief, $cfg);
-}
+    /*
+     * Final exports must come from the selected preview, not a fresh AI render.
+     * Customers pay for the selected concept; changing only size/typography keeps
+     * the preview and final pipelines commercially consistent.
+     */
+    self::resize_final_from_selected_preview($selected_preview_path, $out, $cfg['w'], $cfg['h'], $brief, $cfg);
 
     if (file_exists($out)) {
         @chmod($out, 0664);
@@ -253,6 +257,40 @@ if ($generated && file_exists($generated)) {
 
     return $files;
 }
+
+private static function resolve_selected_preview_source($selected_preview_path) {
+    $selected_preview_path = is_string($selected_preview_path) ? $selected_preview_path : '';
+    if ($selected_preview_path === '') {
+        return '';
+    }
+
+    $candidates = [];
+
+    if (strpos($selected_preview_path, 'poster-ai-preview-clean-') !== false) {
+        $candidates[] = $selected_preview_path;
+    } else {
+        $candidates[] = str_replace('poster-ai-preview-', 'poster-ai-preview-clean-', $selected_preview_path);
+        $candidates[] = str_replace('preview-clean', 'preview', $selected_preview_path);
+        $candidates[] = $selected_preview_path;
+    }
+
+    $uploads = wp_upload_dir();
+    $base = basename($selected_preview_path);
+    $clean_base = str_replace('poster-ai-preview-', 'poster-ai-preview-clean-', $base);
+    $candidates[] = trailingslashit($uploads['basedir']) . 'poster-finals/' . $clean_base;
+    $candidates[] = trailingslashit($uploads['basedir']) . 'poster-previews/' . $clean_base;
+    $candidates[] = trailingslashit($uploads['basedir']) . 'poster-finals/' . $base;
+    $candidates[] = trailingslashit($uploads['basedir']) . 'poster-previews/' . $base;
+
+    foreach (array_values(array_unique(array_filter($candidates))) as $candidate) {
+        if (file_exists($candidate) && filesize($candidate) > 0) {
+            return $candidate;
+        }
+    }
+
+    return '';
+}
+
 private static function generate_image_file($brief, $id, $prefix, $variant, $index, $watermark) {
     $api_key = trim((string) CMSG_Plugin::settings()['openai_api_key']);
     if (!$api_key) {
@@ -261,7 +299,7 @@ private static function generate_image_file($brief, $id, $prefix, $variant, $ind
     }
 
     $uploads = wp_upload_dir();
-    $dir = trailingslashit($uploads['basedir']) . ($prefix === 'preview' ? 'poster-previews' : 'poster-finals');
+    $dir = trailingslashit($uploads['basedir']) . (strpos($prefix, 'preview') === 0 ? 'poster-previews' : 'poster-finals');
     if (!is_dir($dir)) wp_mkdir_p($dir);
 
     $openai_size = '1024x1024';
@@ -272,12 +310,19 @@ private static function generate_image_file($brief, $id, $prefix, $variant, $ind
         $openai_size = '1536x1024';
     }
 
+    $cast_assets = self::cast_actor_assets($brief);
+
     /*
-     * New workflow:
-     * Generate the cinematic poster background without recreating actor faces.
-     * Real actor references are composited afterward so facial likeness is preserved.
+     * Generate a clean background plate when cast uploads exist. The uploaded
+     * actor pixels are composited afterward, so the image model should not invent
+     * replacement cast members or fake poster typography.
      */
-    $prompt = self::build_prompt($brief, $variant);
+    $prompt_brief = $brief;
+    if (!empty($cast_assets)) {
+        $prompt_brief['background_only'] = true;
+    }
+
+    $prompt = self::build_prompt($prompt_brief, $variant);
 
     $prompt .= "\n\nBACKGROUND-ONLY GENERATION:\n";
     $prompt .= "- Do not generate actor faces, portraits, or human closeups.\n";
@@ -289,7 +334,9 @@ private static function generate_image_file($brief, $id, $prefix, $variant, $ind
     $prompt .= "- Environment plate only. Empty cinematic background only.\n";
 
 
-    $response = self::call_image_generation($api_key, $prompt, $openai_size);
+    $response = self::has_reference_images($brief)
+        ? self::call_image_edit($api_key, $prompt, $brief, $openai_size)
+        : self::call_image_generation($api_key, $prompt, $openai_size);
 
     if (is_wp_error($response)) {
         $msg = 'CMSG OPENAI IMAGE ERROR: ' . $response->get_error_message();
@@ -315,37 +362,34 @@ private static function generate_image_file($brief, $id, $prefix, $variant, $ind
     file_put_contents($path, $image_data);
 
 error_log('CMSG CAST FACE MAP CHECK: cast1=' . ($brief['cast_actor_1'] ?? 'none') . ' cast2=' . ($brief['cast_actor_2'] ?? 'none') . ' cast3=' . ($brief['cast_actor_3'] ?? 'none'));
-/*
-$cast_assets = array_values(array_filter([
-    $brief['cast_actor_1'] ?? '',
-    $brief['cast_actor_2'] ?? '',
-    $brief['cast_actor_3'] ?? '',
-]));
 
-if (!empty($cast_assets)) {
-    self::blend_actor_faces_only(
-        $path,
-        $cast_assets,
-        $variant
-    );
-}
-*/
     /*
      * Composite real actor assets onto generated background.
      * This preserves real facial features better than asking AI to recreate faces.
      */
-   error_log('CMSG POSTER COMPOSITE CHECK: assets=' . count($brief['poster_assets'] ?? []) . ' path=' . $path);
+   error_log('CMSG POSTER COMPOSITE CHECK: cast_assets=' . count($cast_assets) . ' path=' . $path);
 
-/*
-    if (!empty($brief['poster_assets']) && is_array($brief['poster_assets'])) {
-        self::composite_actor_assets($path, $brief['poster_assets'], $variant);
+    if (!empty($cast_assets)) {
+        self::composite_actor_assets($path, $cast_assets, $variant);
     }
-*/
 
     if ($watermark) self::apply_watermark($path);
 
     @chmod($path, 0664);
     return $path;
+}
+
+private static function cast_actor_assets($brief) {
+    $assets = [];
+
+    foreach (['cast_actor_1', 'cast_actor_2', 'cast_actor_3'] as $key) {
+        $path = $brief[$key] ?? '';
+        if (is_string($path) && $path !== '' && file_exists($path)) {
+            $assets[] = $path;
+        }
+    }
+
+    return array_values(array_unique($assets));
 }
 
 private static function remove_actor_background($asset_path) {
@@ -393,8 +437,8 @@ private static function composite_actor_assets($background_path, $assets, $varia
     }
 
     if (!extension_loaded('imagick')) {
-        error_log('CMSG POSTER COMPOSITE: Imagick extension not loaded. Skipping actor composite.');
-        return false;
+        error_log('CMSG POSTER COMPOSITE: Imagick extension not loaded. Using GD fallback.');
+        return self::gd_composite_actor_assets($background_path, $assets, $variant);
     }
 
     try {
@@ -423,6 +467,7 @@ error_log('CMSG POSTER CUTOUT PATH: ' . $cutout_path);
 
 if (!$cutout_path || !file_exists($cutout_path)) {
     error_log('CMSG POSTER COMPOSITE: background removal failed for ' . $asset_path);
+    self::gd_composite_actor_assets($background_path, [$asset_path], $variant, $count, $i);
     continue;
 }
 
@@ -547,6 +592,108 @@ error_log('CMSG POSTER COMPOSITED ACTOR: asset=' . $asset_path . ' x=' . $x . ' 
         error_log('CMSG POSTER COMPOSITE ERROR: ' . $e->getMessage());
         return false;
     }
+}
+
+private static function gd_load_image($path) {
+    if (!file_exists($path)) return null;
+
+    $mime = function_exists('mime_content_type') ? mime_content_type($path) : '';
+    if ($mime === 'image/png' && function_exists('imagecreatefrompng')) return imagecreatefrompng($path);
+    if ($mime === 'image/jpeg' && function_exists('imagecreatefromjpeg')) return imagecreatefromjpeg($path);
+    if ($mime === 'image/webp' && function_exists('imagecreatefromwebp')) return imagecreatefromwebp($path);
+
+    return null;
+}
+
+private static function gd_composite_actor_assets($background_path, $assets, $variant = '', $total_count = null, $slot_offset = 0) {
+    if (!function_exists('imagecreatefrompng') || !function_exists('imagecopyresampled')) return false;
+    if (!file_exists($background_path) || empty($assets) || !is_array($assets)) return false;
+
+    $canvas = imagecreatefrompng($background_path);
+    if (!$canvas) return false;
+
+    imagealphablending($canvas, true);
+    imagesavealpha($canvas, true);
+
+    $canvas_w = imagesx($canvas);
+    $canvas_h = imagesy($canvas);
+    $valid_assets = array_values(array_filter($assets, function($asset) {
+        return is_string($asset) && file_exists($asset);
+    }));
+
+    if (empty($valid_assets)) {
+        imagedestroy($canvas);
+        return false;
+    }
+
+    $count = $total_count ? (int)$total_count : count($valid_assets);
+    $drawn = 0;
+
+    foreach ($valid_assets as $local_i => $asset_path) {
+        $i = (int)$slot_offset + (int)$local_i;
+        $actor = self::gd_load_image($asset_path);
+        if (!$actor) continue;
+
+        $actor_w = imagesx($actor);
+        $actor_h = imagesy($actor);
+        if ($actor_w <= 0 || $actor_h <= 0) {
+            imagedestroy($actor);
+            continue;
+        }
+
+        if ($variant === 'banner') {
+            $target_h = (int)round($canvas_h * 0.50);
+            $x_slots = [0.25, 0.50, 0.75, 0.36, 0.64];
+            $bottom_y = (int)round($canvas_h * 0.82);
+        } elseif ($count === 1) {
+            $target_h = (int)round($canvas_h * 0.58);
+            $x_slots = [0.50];
+            $bottom_y = (int)round($canvas_h * 0.72);
+        } elseif ($count === 2) {
+            $target_h = (int)round($canvas_h * 0.50);
+            $x_slots = [0.34, 0.66];
+            $bottom_y = (int)round($canvas_h * 0.72);
+        } else {
+            $target_h = (int)round($canvas_h * 0.43);
+            $x_slots = [0.24, 0.50, 0.76, 0.36, 0.64];
+            $bottom_y = (int)round($canvas_h * 0.72);
+        }
+
+        $scale = $target_h / $actor_h;
+        $target_w = max(1, (int)round($actor_w * $scale));
+        $target_h = max(1, (int)round($actor_h * $scale));
+
+        $x_ratio = $x_slots[$i] ?? 0.50;
+        $x = (int)round(($canvas_w * $x_ratio) - ($target_w / 2));
+        $y = (int)round($bottom_y - $target_h);
+
+        $x = max(0, min($x, $canvas_w - $target_w));
+        $y = max(0, min($y, $canvas_h - $target_h));
+
+        $shadow = imagecolorallocatealpha($canvas, 0, 0, 0, 70);
+        imagefilledellipse(
+            $canvas,
+            (int)round($x + ($target_w / 2)),
+            (int)round($y + ($target_h * 0.86)),
+            (int)round($target_w * 0.88),
+            (int)round($target_h * 0.24),
+            $shadow
+        );
+
+        imagecopyresampled($canvas, $actor, $x, $y, 0, 0, $target_w, $target_h, $actor_w, $actor_h);
+        imagedestroy($actor);
+        $drawn++;
+
+        error_log('CMSG POSTER GD COMPOSITED ACTOR: asset=' . $asset_path . ' x=' . $x . ' y=' . $y . ' w=' . $target_w . ' h=' . $target_h);
+    }
+
+    if ($drawn > 0) {
+        imagepng($canvas, $background_path, 6);
+        @chmod($background_path, 0664);
+    }
+
+    imagedestroy($canvas);
+    return $drawn > 0;
 }
 
 /*
@@ -810,6 +957,10 @@ private static function resize_canvas_png($src, $dest, $target_w, $target_h, $br
     self::overlay_title_and_tagline($dest, $brief, $target_w, $target_h, $cfg);
 
     return true;
+}
+
+private static function resize_final_from_selected_preview($src, $dest, $target_w, $target_h, $brief, $cfg = []) {
+    return self::resize_canvas_png($src, $dest, $target_w, $target_h, $brief, $cfg);
 }
 
 private static function resize_final_native_png($src, $dest, $target_w, $target_h, $brief, $cfg = []) {

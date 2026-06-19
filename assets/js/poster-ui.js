@@ -69,8 +69,6 @@ jQuery(function($){
       cast_actor_1_instruction: $('#cmmt-cast-actor-1-instruction').val() || '',
       cast_actor_2_instruction: $('#cmmt-cast-actor-2-instruction').val() || '',
       cast_actor_3_instruction: $('#cmmt-cast-actor-3-instruction').val() || '',
-
-      cast_scene_instruction: $('#cmmt-cast-scene-instruction').val() || '',
     };
   }
 
@@ -84,8 +82,6 @@ function collectPosterPayloadFormData(actionName){
     fd.set('cast_actor_1_instruction', $('#cmmt-cast-actor-1-instruction').val() || '');
     fd.set('cast_actor_2_instruction', $('#cmmt-cast-actor-2-instruction').val() || '');
     fd.set('cast_actor_3_instruction', $('#cmmt-cast-actor-3-instruction').val() || '');
-
-    fd.set('cast_scene_instruction', $('#cmmt-cast-scene-instruction').val() || '');
 
     return fd;
 }
@@ -266,7 +262,8 @@ setStatus('This image is now selected for final poster creation. Complete PayPal
       return;
     }
 
-    var selectedPreviewUrl = previewUrls[selectedConcept] || '';
+    var activePreviewUrl = $('.cmmt-poster-preview.active img').attr('src') || '';
+    var selectedPreviewUrl = activePreviewUrl || previewUrls[selectedConcept] || '';
     if (!selectedPreviewUrl) {
       setStatus('Please select a poster concept before creating final files.', 'is-error');
       return;
