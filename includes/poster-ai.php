@@ -1066,49 +1066,34 @@ private static function resize_final_from_selected_preview($src, $dest, $target_
 
     $canvas = imagecreatetruecolor($target_w, $target_h);
 
-    // Fill the canvas edge-to-edge with a cover crop from the selected preview.
-    // Then place a protected foreground copy from the same preview so key faces
-    // are not cut off when square previews export to portrait or banner formats.
-    $cover_scale = max($target_w / $src_w, $target_h / $src_h);
-    $cover_w = (int)ceil($src_w * $cover_scale);
-    $cover_h = (int)ceil($src_h * $cover_scale);
-
-    $cover_x = (int)floor(($target_w - $cover_w) / 2);
-    $cover_y = (int)floor(($target_h - $cover_h) / 2);
-
+    // Single-layer smart cover crop. No letterboxing and no duplicated overlay.
     $aspect = $target_w / max(1, $target_h);
-    if ($aspect > 1.3 && $cover_h > $target_h) {
-        $cover_y = 0;
-    } elseif ($aspect < 0.8 && $cover_w > $target_w) {
-        $cover_x = (int)floor(($target_w - $cover_w) / 2);
-    }
+    $target_ratio = $target_w / max(1, $target_h);
+    $src_ratio = $src_w / max(1, $src_h);
 
-    imagecopyresampled($canvas, $img, $cover_x, $cover_y, 0, 0, $cover_w, $cover_h, $src_w, $src_h);
+    if ($src_ratio > $target_ratio) {
+        $crop_h = $src_h;
+        $crop_w = (int)round($src_h * $target_ratio);
 
-    if (function_exists('imagefilter')) {
-        imagefilter($canvas, IMG_FILTER_GAUSSIAN_BLUR);
-        imagefilter($canvas, IMG_FILTER_BRIGHTNESS, -18);
-        imagefilter($canvas, IMG_FILTER_CONTRAST, -8);
-    }
-
-    $foreground_scale = min(
-        ($target_w * 0.98) / $src_w,
-        ($target_h * ($aspect > 1.3 ? 0.96 : 0.82)) / $src_h
-    );
-
-    $foreground_w = (int)floor($src_w * $foreground_scale);
-    $foreground_h = (int)floor($src_h * $foreground_scale);
-    $foreground_x = (int)floor(($target_w - $foreground_w) / 2);
-
-    if ($aspect > 1.3) {
-        $foreground_y = (int)floor(($target_h - $foreground_h) * 0.22);
-    } elseif ($aspect < 0.8) {
-        $foreground_y = (int)floor($target_h * 0.04);
+        // Portrait exports from square previews should protect the central cast
+        // group instead of blindly cropping from the exact center.
+        $focus_x = $aspect < 0.8 ? 0.50 : 0.50;
+        $src_x = (int)round(($src_w * $focus_x) - ($crop_w / 2));
+        $src_y = 0;
     } else {
-        $foreground_y = (int)floor(($target_h - $foreground_h) / 2);
+        $crop_w = $src_w;
+        $crop_h = (int)round($src_w / $target_ratio);
+
+        // Banner exports need the top/middle actor faces, not the lower title area.
+        $focus_y = $aspect > 1.3 ? 0.36 : 0.46;
+        $src_x = 0;
+        $src_y = (int)round(($src_h * $focus_y) - ($crop_h / 2));
     }
 
-    imagecopyresampled($canvas, $img, $foreground_x, $foreground_y, 0, 0, $foreground_w, $foreground_h, $src_w, $src_h);
+    $src_x = max(0, min($src_x, $src_w - $crop_w));
+    $src_y = max(0, min($src_y, $src_h - $crop_h));
+
+    imagecopyresampled($canvas, $img, 0, 0, $src_x, $src_y, $target_w, $target_h, $crop_w, $crop_h);
 
     imagepng($canvas, $dest, 9);
 
