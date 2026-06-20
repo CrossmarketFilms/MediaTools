@@ -60,17 +60,17 @@ STRICT BACKGROUND-ONLY RULES:
 
         $variant_text = 'Final output: create a vertical poster composition designed specifically for 900x1285. Keep every actor fully inside frame. Do not crop the top of the male character’s head. Leave visible headroom above all characters. Keep all faces, hairlines, shoulders, and important body elements fully visible. Leave clean lower title-safe area.';
         if ($concept_variant === 'hero') {
-            $variant_text = 'Concept direction: dramatic hero composition, bold central subject, high contrast lighting.';
+            $variant_text = 'Concept direction: dramatic hero composition, bold central subject, high contrast lighting. Compose natively as a 900x1285 vertical poster with all actor faces fully inside frame and clean lower title-safe space.';
         } elseif ($concept_variant === 'emotional') {
-            $variant_text = 'Concept direction: emotional character-focused poster, cinematic faces, intimate dramatic tension.';
+            $variant_text = 'Concept direction: emotional character-focused poster, cinematic faces, intimate dramatic tension. Compose natively as a 900x1285 vertical poster with all actor faces fully inside frame and clean lower title-safe space.';
         } elseif ($concept_variant === 'streaming') {
-            $variant_text = 'Concept direction: bold streaming key art, commercial layout, striking visual hook, premium platform look.';
+            $variant_text = 'Concept direction: bold streaming key art, commercial layout, striking visual hook, premium platform look. Compose natively as a 900x1285 vertical poster with all actor faces fully inside frame and clean lower title-safe space.';
         } elseif ($concept_variant === 'vertical') {
             $variant_text = 'Final output: create a native vertical poster composition for 900x1285. Use the selected preview as the exact design reference. Preserve the same cast, mood, layout, color palette, and concept. Recompose naturally for portrait format with all heads, faces, shoulders, bodies, house, props, and important elements fully visible. Leave clean lower title-safe space.';
         } elseif ($concept_variant === 'square') {
             $variant_text = 'Final output: square social poster composition with centered commercial key art.';
         } elseif ($concept_variant === 'banner') {
-            $variant_text = 'Final output: create a native landscape banner composition for 896x504. Use the selected preview as the exact design reference. Preserve the same cast, mood, layout, color palette, and concept. Recompose naturally for wide horizontal format with all actor faces fully visible. Do not crop heads or faces. Leave clean lower-center title-safe space.';
+            $variant_text = 'Final output: create a native landscape banner composition for 895x504. Use the selected preview as the exact design reference. Preserve the same cast, mood, layout, color palette, and concept. Recompose naturally for wide horizontal format with all actor faces fully visible. Do not crop heads or faces. Leave clean lower-center title-safe space.';
         }
 
         return "Create a high-end cinematic movie poster key art concept.\n\n"
@@ -110,8 +110,8 @@ STRICT BACKGROUND-ONLY RULES:
             . "- Leave large clean empty safe zones for title and tagline placement\n"
             . "- Never place faces, logos, weapons, credits, or important objects near image edges\n"
             . "- Keep all major composition elements inside center-safe boundaries\n"
-            . "- For 1280x720 landscape/banner posters, preserve strong left/right and top/bottom safe padding\n"
-            . "- For 1080x1920 vertical posters, preserve strong left/right and top/bottom safe padding\n"
+            . "- For 895x504 landscape/banner posters, preserve strong left/right and top/bottom safe padding\n"
+            . "- For 900x1285 vertical posters, preserve strong left/right and top/bottom safe padding\n"
             . "- Generate finished cinematic key art without final typography\n"
             . "- Absolutely no readable movie title text inside the generated image\n"
             . "- Absolutely no tagline text inside the generated image\n"
@@ -181,6 +181,7 @@ try {
 }
 
         if ($clean_path && file_exists($clean_path)) {
+            self::resize_png_cover_no_overlay($clean_path, $clean_path, 900, 1285);
             self::generate_preview_format_family($clean_path, $brief);
 
             // Add title/tagline to clean source so finals match selected concept exactly
@@ -210,7 +211,6 @@ private static function generate_preview_format_family($clean_path, $brief) {
     if (empty($clean_path) || !file_exists($clean_path)) return;
 
     $family = [
-        'vertical' => ['size' => '1024x1536'],
         'banner' => ['size' => '1536x1024'],
     ];
 
@@ -248,7 +248,7 @@ private static function generate_native_preview_family_source($selected_preview_
 
     $format_label = ($key === 'vertical')
         ? 'vertical portrait poster composition for 900x1285 final delivery'
-        : 'wide landscape banner composition for 896x504 final delivery';
+        : 'wide landscape banner composition for 895x504 final delivery';
 
     $prompt = "Use the uploaded selected clean poster preview as the exact concept reference.\n";
     $prompt .= "Create a native {$format_label} version of the same poster concept now, during preview generation.\n";
@@ -284,6 +284,12 @@ private static function generate_native_preview_family_source($selected_preview_
     file_put_contents($out, $image_data);
     @chmod($out, 0664);
 
+    if ($key === 'banner') {
+        self::resize_png_cover_no_overlay($out, $out, 895, 504);
+    } elseif ($key === 'vertical') {
+        self::resize_png_cover_no_overlay($out, $out, 900, 1285);
+    }
+
     return file_exists($out) && filesize($out) > 0;
 }
 
@@ -307,7 +313,7 @@ public static function generate_final_files($brief, $job_id, $selected_concept =
         ],
         'banner' => [
             'prompt' => 'banner',
-            'w' => 896,
+            'w' => 895,
             'h' => 504,
             'safe_w' => 806,
             'safe_h' => 454,
@@ -330,19 +336,25 @@ public static function generate_final_files($brief, $job_id, $selected_concept =
     @copy($selected_preview_path, $source_copy);
     @chmod($source_copy, 0664);
 
+    $format_sources = [];
+    foreach ($variant_map as $key => $cfg) {
+        $format_source = self::resolve_selected_preview_format_source($selected_preview_path, $key);
+        if (!$format_source || !file_exists($format_source)) {
+            error_log('CMSG POSTER FINAL TRACE: ' . $key . '_clean_source_file=MISSING');
+            error_log('CMSG POSTER FINAL TRACE: FINAL_EXPORT_ABORTED missing_pre_generated_' . $key . '_source');
+            self::$in_final_generation = false;
+            return [];
+        }
+        $format_sources[$key] = $format_source;
+    }
+
 foreach ($variant_map as $key => $cfg) {
     $out = trailingslashit($dir) . $slug . '-' . intval($job_id) . '-' . $key . '.png';
 
-    $format_source = self::resolve_selected_preview_format_source($selected_preview_path, $key);
-    if ($format_source && file_exists($format_source)) {
-        error_log('CMSG POSTER FINAL TRACE: ' . $key . '_clean_source_file=' . $format_source);
-        error_log('CMSG POSTER FINAL TRACE: ' . $key . '_export_mode=pre_generated_clean_source');
-        self::resize_final_native_png($format_source, $out, $cfg['w'], $cfg['h'], $brief, $cfg);
-    } else {
-        error_log('CMSG POSTER FINAL TRACE: ' . $key . '_clean_source_file=MISSING');
-        error_log('CMSG POSTER FINAL TRACE: ' . $key . '_export_mode=deterministic_crop_fallback');
-        self::resize_final_from_selected_preview($selected_preview_path, $out, $cfg['w'], $cfg['h'], $brief, $cfg);
-    }
+    $format_source = $format_sources[$key];
+    error_log('CMSG POSTER FINAL TRACE: ' . $key . '_clean_source_file=' . $format_source);
+    error_log('CMSG POSTER FINAL TRACE: ' . $key . '_export_mode=pre_generated_clean_source');
+    self::resize_final_native_png($format_source, $out, $cfg['w'], $cfg['h'], $brief, $cfg);
 
     if (file_exists($out)) {
         @chmod($out, 0664);
@@ -361,18 +373,31 @@ private static function resolve_selected_preview_format_source($selected_preview
     $key = sanitize_key($key);
     if ($selected_preview_path === '' || $key === '') return '';
 
+    if ($key === 'vertical' && file_exists($selected_preview_path) && filesize($selected_preview_path) > 0) {
+        return $selected_preview_path;
+    }
+
     $candidates = [];
-    $candidates[] = self::preview_family_path($selected_preview_path, $key);
+    if ($key !== 'vertical') {
+        $candidates[] = self::preview_family_path($selected_preview_path, $key);
+    }
 
     if (strpos($selected_preview_path, 'poster-ai-preview-clean-') === false) {
         $clean_path = str_replace('poster-ai-preview-', 'poster-ai-preview-clean-', $selected_preview_path);
-        $candidates[] = self::preview_family_path($clean_path, $key);
+        if ($key === 'vertical' && file_exists($clean_path) && filesize($clean_path) > 0) {
+            return $clean_path;
+        }
+        if ($key !== 'vertical') {
+            $candidates[] = self::preview_family_path($clean_path, $key);
+        }
     }
 
     $uploads = wp_upload_dir();
     $base = basename($selected_preview_path);
     $clean_base = str_replace('poster-ai-preview-', 'poster-ai-preview-clean-', $base);
-    $family_base = preg_replace('/\.png$/i', '-' . $key . '.png', $clean_base);
+    $family_base = $key === 'vertical'
+        ? $clean_base
+        : preg_replace('/\.png$/i', '-' . $key . '.png', $clean_base);
     $candidates[] = trailingslashit($uploads['basedir']) . 'poster-previews/' . $family_base;
     $candidates[] = trailingslashit($uploads['basedir']) . 'poster-finals/' . $family_base;
 
@@ -431,7 +456,9 @@ private static function generate_image_file($brief, $id, $prefix, $variant, $ind
 
     $openai_size = '1024x1024';
 
-    if ($prefix === 'final' && $variant === 'vertical') {
+    if (strpos($prefix, 'preview') === 0 && $variant !== 'banner') {
+        $openai_size = '1024x1536';
+    } elseif ($prefix === 'final' && $variant === 'vertical') {
         $openai_size = '1024x1536';
     } elseif ($prefix === 'final' && $variant === 'banner') {
         $openai_size = '1536x1024';
@@ -1187,60 +1214,6 @@ private static function resize_canvas_png($src, $dest, $target_w, $target_h, $br
     return true;
 }
 
-private static function resize_final_from_selected_preview($src, $dest, $target_w, $target_h, $brief, $cfg = []) {
-    if (!function_exists('imagecreatefrompng') || !file_exists($src)) return false;
-
-    $img = imagecreatefrompng($src);
-    if (!$img) return false;
-
-    $src_w = imagesx($img);
-    $src_h = imagesy($img);
-
-    if ($src_w <= 0 || $src_h <= 0 || $target_w <= 0 || $target_h <= 0) {
-        imagedestroy($img);
-        return false;
-    }
-
-    $canvas = imagecreatetruecolor($target_w, $target_h);
-
-    // Single-layer smart cover crop. No letterboxing and no duplicated overlay.
-    $aspect = $target_w / max(1, $target_h);
-    $target_ratio = $target_w / max(1, $target_h);
-    $src_ratio = $src_w / max(1, $src_h);
-
-    if ($src_ratio > $target_ratio) {
-        $crop_h = $src_h;
-        $crop_w = (int)round($src_h * $target_ratio);
-
-        // Portrait exports from square previews should protect the central cast
-        // group instead of blindly cropping from the exact center.
-        $focus_x = $aspect < 0.8 ? 0.50 : 0.50;
-        $src_x = (int)round(($src_w * $focus_x) - ($crop_w / 2));
-        $src_y = 0;
-    } else {
-        $crop_w = $src_w;
-        $crop_h = (int)round($src_w / $target_ratio);
-
-        // Banner exports need the top/middle actor faces, not the lower title area.
-        $focus_y = $aspect > 1.3 ? 0.36 : 0.46;
-        $src_x = 0;
-        $src_y = (int)round(($src_h * $focus_y) - ($crop_h / 2));
-    }
-
-    $src_x = max(0, min($src_x, $src_w - $crop_w));
-    $src_y = max(0, min($src_y, $src_h - $crop_h));
-
-    imagecopyresampled($canvas, $img, 0, 0, $src_x, $src_y, $target_w, $target_h, $crop_w, $crop_h);
-
-    imagepng($canvas, $dest, 9);
-
-    imagedestroy($img);
-    imagedestroy($canvas);
-
-    self::overlay_title_and_tagline($dest, $brief, $target_w, $target_h, $cfg);
-    return true;
-}
-
 private static function resize_final_native_png($src, $dest, $target_w, $target_h, $brief, $cfg = []) {
     if (!function_exists('imagecreatefrompng') || !file_exists($src)) return false;
 
@@ -1269,6 +1242,44 @@ private static function resize_final_native_png($src, $dest, $target_w, $target_
 
     self::overlay_title_and_tagline($dest, $brief, $target_w, $target_h, $cfg);
     return true;
+}
+
+private static function resize_png_cover_no_overlay($src, $dest, $target_w, $target_h) {
+    if (!function_exists('imagecreatefrompng') || !file_exists($src)) return false;
+
+    $img = imagecreatefrompng($src);
+    if (!$img) return false;
+
+    $src_w = imagesx($img);
+    $src_h = imagesy($img);
+    if ($src_w <= 0 || $src_h <= 0 || $target_w <= 0 || $target_h <= 0) {
+        imagedestroy($img);
+        return false;
+    }
+
+    $canvas = imagecreatetruecolor($target_w, $target_h);
+    $scale = max($target_w / $src_w, $target_h / $src_h);
+    $new_w = (int)ceil($src_w * $scale);
+    $new_h = (int)ceil($src_h * $scale);
+    $dst_x = (int)floor(($target_w - $new_w) / 2);
+    $dst_y = (int)floor(($target_h - $new_h) / 2);
+
+    imagecopyresampled($canvas, $img, $dst_x, $dst_y, 0, 0, $new_w, $new_h, $src_w, $src_h);
+
+    $tmp = $dest . '.tmp-' . wp_generate_password(8, false) . '.png';
+    $ok = imagepng($canvas, $tmp, 9);
+
+    imagedestroy($img);
+    imagedestroy($canvas);
+
+    if (!$ok || !file_exists($tmp)) {
+        @unlink($tmp);
+        return false;
+    }
+
+    @rename($tmp, $dest);
+    @chmod($dest, 0664);
+    return file_exists($dest) && filesize($dest) > 0;
 }
     private static function poster_font_path($style = 'cinematic_bold') {
         $map = [
