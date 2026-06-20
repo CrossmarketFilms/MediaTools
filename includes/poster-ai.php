@@ -385,63 +385,6 @@ private static function resolve_selected_preview_format_source($selected_preview
     return '';
 }
 
-private static function generate_native_final_from_selected_preview($selected_preview_path, $out, $brief, $cfg, $key) {
-    $api_key = trim((string) CMSG_Plugin::settings()['openai_api_key']);
-    if (!$api_key || empty($selected_preview_path) || !file_exists($selected_preview_path)) {
-        return false;
-    }
-
-    $target_w = (int)($cfg['w'] ?? 0);
-    $target_h = (int)($cfg['h'] ?? 0);
-    if ($target_w <= 0 || $target_h <= 0) return false;
-
-    $openai_size = ($key === 'vertical') ? '1024x1536' : '1536x1024';
-    $format_label = ($key === 'vertical')
-        ? 'vertical portrait poster, 900x1285 final crop'
-        : 'wide landscape banner poster, 896x504 final crop';
-
-    $prompt = "Use the uploaded selected clean poster preview as the exact concept reference.\n";
-    $prompt .= "Create a native {$format_label} version of the same movie poster.\n";
-    $prompt .= "Preserve the same cast, actor likenesses, emotional expressions, wardrobe, broken-heart symbol, lighting, color palette, mood, and Lagos/city skyline concept.\n";
-    $prompt .= "Recompose the poster naturally for this output format instead of cropping the square preview.\n";
-    $prompt .= "All actor faces, heads, eyes, mouths, hairlines, and important facial features must be fully visible inside the frame with safe margins.\n";
-    $prompt .= "Do not crop off side faces. Do not cut off foreheads, chins, eyes, or partial faces.\n";
-    $prompt .= "Leave clean lower title-safe space. Do not render the movie title, tagline, credits, or any readable text; the plugin overlays typography after generation.\n";
-    $prompt .= "The result must look like a finished professional theatrical/streaming key-art poster, not a collage and not a screenshot.\n";
-
-    $edit_brief = [
-        'style_reference' => $selected_preview_path,
-        'poster_assets' => [],
-    ];
-
-    $response = self::call_image_edit($api_key, $prompt, $edit_brief, $openai_size);
-    if (is_wp_error($response)) {
-        error_log('CMSG FINAL NATIVE EDIT ERROR: ' . $response->get_error_message());
-        return false;
-    }
-
-    $code = wp_remote_retrieve_response_code($response);
-    $body = wp_remote_retrieve_body($response);
-    $data = json_decode($body, true);
-
-    if ($code < 200 || $code >= 300 || empty($data['data'][0]['b64_json'])) {
-        error_log('CMSG FINAL NATIVE EDIT ERROR CODE: ' . $code . ' BODY: ' . $body);
-        return false;
-    }
-
-    $image_data = base64_decode($data['data'][0]['b64_json']);
-    if (!$image_data) return false;
-
-    $tmp = $out . '.native-source.png';
-    file_put_contents($tmp, $image_data);
-    @chmod($tmp, 0664);
-
-    $ok = self::resize_final_native_png($tmp, $out, $target_w, $target_h, $brief, $cfg);
-    @unlink($tmp);
-
-    return $ok && file_exists($out);
-}
-
 private static function resolve_selected_preview_source($selected_preview_path) {
     $selected_preview_path = is_string($selected_preview_path) ? $selected_preview_path : '';
     if ($selected_preview_path === '') {
