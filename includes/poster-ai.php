@@ -2,6 +2,9 @@
 if (!defined('ABSPATH')) { exit; }
 
 final class CMSG_Poster_AI {
+    private static $in_final_generation = false;
+    private static $final_openai_calls = 0;
+
     public static function build_prompt($brief, $concept_variant = '') {
         $title = sanitize_text_field($brief['title'] ?? 'Untitled Film');
         $genre = sanitize_text_field($brief['genre'] ?? 'cinematic drama');
@@ -285,6 +288,9 @@ private static function generate_native_preview_family_source($selected_preview_
 }
 
 public static function generate_final_files($brief, $job_id, $selected_concept = 0) {
+    self::$in_final_generation = true;
+    self::$final_openai_calls = 0;
+
     $dir = trailingslashit(wp_upload_dir()['basedir']) . 'poster-finals';
     if (!is_dir($dir)) wp_mkdir_p($dir);
 
@@ -313,10 +319,12 @@ public static function generate_final_files($brief, $job_id, $selected_concept =
 
     if (empty($selected_preview_path) || !file_exists($selected_preview_path)) {
         error_log('CMSG POSTER FINAL SOURCE MISSING: selected=' . $selected_display_path . ' resolved=' . $selected_preview_path);
+        self::$in_final_generation = false;
         return $files;
     }
 
-    error_log('CMSG POSTER FINAL SOURCE: selected=' . $selected_display_path . ' resolved=' . $selected_preview_path);
+    error_log('CMSG POSTER FINAL TRACE: selected_preview_file=' . $selected_display_path);
+    error_log('CMSG POSTER FINAL TRACE: selected_clean_preview_file=' . $selected_preview_path);
 
     $source_copy = trailingslashit($dir) . $slug . '-' . intval($job_id) . '-selected-source.png';
     @copy($selected_preview_path, $source_copy);
@@ -327,8 +335,12 @@ foreach ($variant_map as $key => $cfg) {
 
     $format_source = self::resolve_selected_preview_format_source($selected_preview_path, $key);
     if ($format_source && file_exists($format_source)) {
+        error_log('CMSG POSTER FINAL TRACE: ' . $key . '_clean_source_file=' . $format_source);
+        error_log('CMSG POSTER FINAL TRACE: ' . $key . '_export_mode=pre_generated_clean_source');
         self::resize_final_native_png($format_source, $out, $cfg['w'], $cfg['h'], $brief, $cfg);
     } else {
+        error_log('CMSG POSTER FINAL TRACE: ' . $key . '_clean_source_file=MISSING');
+        error_log('CMSG POSTER FINAL TRACE: ' . $key . '_export_mode=deterministic_crop_fallback');
         self::resize_final_from_selected_preview($selected_preview_path, $out, $cfg['w'], $cfg['h'], $brief, $cfg);
     }
 
@@ -337,6 +349,9 @@ foreach ($variant_map as $key => $cfg) {
         $files[$key] = $out;
     }
 }
+
+    error_log('CMSG POSTER FINAL TRACE: openai_calls_during_finalization=' . intval(self::$final_openai_calls));
+    self::$in_final_generation = false;
 
     return $files;
 }
@@ -1002,6 +1017,11 @@ public static function blend_selected_actor_face($poster_path, $actor_path, $fac
 }
 
      private static function call_image_generation($api_key, $prompt, $size = '1024x1024') {
+        if (self::$in_final_generation) {
+            self::$final_openai_calls++;
+            error_log('CMSG POSTER FINAL TRACE: OPENAI_IMAGE_GENERATION_CALLED_DURING_FINALIZATION size=' . $size);
+        }
+
         return wp_remote_post('https://api.openai.com/v1/images/generations', [
             'headers' => [
                 'Authorization' => 'Bearer ' . $api_key,
@@ -1076,6 +1096,11 @@ private static function normalize_reference_image_for_openai($path) {
 }
 
      private static function call_image_edit($api_key, $prompt, $brief, $size = '1024x1024') {
+        if (self::$in_final_generation) {
+            self::$final_openai_calls++;
+            error_log('CMSG POSTER FINAL TRACE: OPENAI_IMAGE_EDIT_CALLED_DURING_FINALIZATION size=' . $size);
+        }
+
         $boundary = wp_generate_password(24, false);
         $eol = "\r\n";
         $body = '';

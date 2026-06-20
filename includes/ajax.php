@@ -635,6 +635,9 @@ if (is_wp_error($previews)) {
         $selected_preview_path = self::url_to_upload_path($selected_preview_url);
         $poster_scene_direction = self::poster_scene_direction($meta);
 
+        error_log('CMSG POSTER FINALIZE AJAX TRACE: selected_preview_url=' . $selected_preview_url);
+        error_log('CMSG POSTER FINALIZE AJAX TRACE: selected_preview_path=' . $selected_preview_path);
+
         $brief = [
             'title' => sanitize_text_field(wp_unslash($_POST['title'] ?? '')),
             'tagline' => sanitize_text_field(wp_unslash($_POST['tagline'] ?? '')),
