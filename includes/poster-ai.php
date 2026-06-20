@@ -178,6 +178,8 @@ try {
 }
 
         if ($clean_path && file_exists($clean_path)) {
+            self::generate_preview_format_family($clean_path, $brief);
+
             // Add title/tagline to clean source so finals match selected concept exactly
             // self::overlay_title_and_tagline($clean_path, $brief, 0, 0);
 
@@ -198,8 +200,89 @@ self::apply_watermark($display_path);
         if (empty($files)) {
             return self::generate_svg_fallback_previews($brief, $draft_id);
         }
-        return $files;
+    return $files;
+}
+
+private static function generate_preview_format_family($clean_path, $brief) {
+    if (empty($clean_path) || !file_exists($clean_path)) return;
+
+    $family = [
+        'vertical' => ['size' => '1024x1536'],
+        'banner' => ['size' => '1536x1024'],
+    ];
+
+    foreach ($family as $key => $cfg) {
+        $family_path = self::preview_family_path($clean_path, $key);
+        if (file_exists($family_path) && filesize($family_path) > 0) {
+            continue;
+        }
+
+        self::generate_native_preview_family_source($clean_path, $family_path, $brief, $key, $cfg['size']);
+
+        if (file_exists($family_path) && filesize($family_path) > 0) {
+            $display_path = self::preview_family_display_path($clean_path, $key);
+            @copy($family_path, $display_path);
+            self::overlay_title_and_tagline($display_path, $brief, 0, 0);
+            self::apply_watermark($display_path);
+            @chmod($display_path, 0664);
+        }
     }
+}
+
+private static function preview_family_path($clean_path, $key) {
+    return preg_replace('/\.png$/i', '-' . sanitize_key($key) . '.png', $clean_path);
+}
+
+private static function preview_family_display_path($clean_path, $key) {
+    return str_replace('preview-clean', 'preview', self::preview_family_path($clean_path, $key));
+}
+
+private static function generate_native_preview_family_source($selected_preview_path, $out, $brief, $key, $openai_size) {
+    $api_key = trim((string) CMSG_Plugin::settings()['openai_api_key']);
+    if (!$api_key || empty($selected_preview_path) || !file_exists($selected_preview_path)) {
+        return false;
+    }
+
+    $format_label = ($key === 'vertical')
+        ? 'vertical portrait poster composition for 900x1285 final delivery'
+        : 'wide landscape banner composition for 896x504 final delivery';
+
+    $prompt = "Use the uploaded selected clean poster preview as the exact concept reference.\n";
+    $prompt .= "Create a native {$format_label} version of the same poster concept now, during preview generation.\n";
+    $prompt .= "Preserve the same cast, actor likenesses, emotional expressions, wardrobe, broken-heart symbol, lighting, color palette, mood, and city skyline concept.\n";
+    $prompt .= "Recompose naturally for this output format. All actor faces, heads, eyes, mouths, hairlines, and important facial features must be fully visible inside the frame with safe margins.\n";
+    $prompt .= "Do not crop off side faces. Do not cut off foreheads, chins, eyes, or partial faces.\n";
+    $prompt .= "Leave clean lower title-safe space. Do not render the movie title, tagline, credits, or any readable text; the plugin overlays typography later.\n";
+    $prompt .= "The result must look like finished professional theatrical/streaming key art, not a collage and not a screenshot.\n";
+
+    $edit_brief = [
+        'style_reference' => $selected_preview_path,
+        'poster_assets' => [],
+    ];
+
+    $response = self::call_image_edit($api_key, $prompt, $edit_brief, $openai_size);
+    if (is_wp_error($response)) {
+        error_log('CMSG PREVIEW FAMILY EDIT ERROR: ' . $response->get_error_message());
+        return false;
+    }
+
+    $code = wp_remote_retrieve_response_code($response);
+    $body = wp_remote_retrieve_body($response);
+    $data = json_decode($body, true);
+
+    if ($code < 200 || $code >= 300 || empty($data['data'][0]['b64_json'])) {
+        error_log('CMSG PREVIEW FAMILY EDIT ERROR CODE: ' . $code . ' BODY: ' . $body);
+        return false;
+    }
+
+    $image_data = base64_decode($data['data'][0]['b64_json']);
+    if (!$image_data) return false;
+
+    file_put_contents($out, $image_data);
+    @chmod($out, 0664);
+
+    return file_exists($out) && filesize($out) > 0;
+}
 
 public static function generate_final_files($brief, $job_id, $selected_concept = 0) {
     $dir = trailingslashit(wp_upload_dir()['basedir']) . 'poster-finals';
@@ -242,13 +325,10 @@ public static function generate_final_files($brief, $job_id, $selected_concept =
 foreach ($variant_map as $key => $cfg) {
     $out = trailingslashit($dir) . $slug . '-' . intval($job_id) . '-' . $key . '.png';
 
-    $native_rendered = self::generate_native_final_from_selected_preview($selected_preview_path, $out, $brief, $cfg, $key);
-
-    if (!$native_rendered) {
-        /*
-         * Fallback only: derive directly from selected preview if native AI
-         * recompose fails, without creating an unrelated composition.
-         */
+    $format_source = self::resolve_selected_preview_format_source($selected_preview_path, $key);
+    if ($format_source && file_exists($format_source)) {
+        self::resize_final_native_png($format_source, $out, $cfg['w'], $cfg['h'], $brief, $cfg);
+    } else {
         self::resize_final_from_selected_preview($selected_preview_path, $out, $cfg['w'], $cfg['h'], $brief, $cfg);
     }
 
@@ -259,6 +339,35 @@ foreach ($variant_map as $key => $cfg) {
 }
 
     return $files;
+}
+
+private static function resolve_selected_preview_format_source($selected_preview_path, $key) {
+    $selected_preview_path = is_string($selected_preview_path) ? $selected_preview_path : '';
+    $key = sanitize_key($key);
+    if ($selected_preview_path === '' || $key === '') return '';
+
+    $candidates = [];
+    $candidates[] = self::preview_family_path($selected_preview_path, $key);
+
+    if (strpos($selected_preview_path, 'poster-ai-preview-clean-') === false) {
+        $clean_path = str_replace('poster-ai-preview-', 'poster-ai-preview-clean-', $selected_preview_path);
+        $candidates[] = self::preview_family_path($clean_path, $key);
+    }
+
+    $uploads = wp_upload_dir();
+    $base = basename($selected_preview_path);
+    $clean_base = str_replace('poster-ai-preview-', 'poster-ai-preview-clean-', $base);
+    $family_base = preg_replace('/\.png$/i', '-' . $key . '.png', $clean_base);
+    $candidates[] = trailingslashit($uploads['basedir']) . 'poster-previews/' . $family_base;
+    $candidates[] = trailingslashit($uploads['basedir']) . 'poster-finals/' . $family_base;
+
+    foreach (array_values(array_unique(array_filter($candidates))) as $candidate) {
+        if (file_exists($candidate) && filesize($candidate) > 0) {
+            return $candidate;
+        }
+    }
+
+    return '';
 }
 
 private static function generate_native_final_from_selected_preview($selected_preview_path, $out, $brief, $cfg, $key) {
