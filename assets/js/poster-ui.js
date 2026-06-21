@@ -246,7 +246,7 @@ setStatus('This image is now selected for final poster creation. Complete PayPal
         return capturePosterOrder(posterDraftId, data.orderID).then(function(resp){
           posterPaymentToken = resp.payment_token || '';
           setStep(4);
-          setStatus('Payment confirmed. Click “Create Final Posters & Download” to generate your selected poster in 3 clean sizes. Download buttons will appear below and an email will be sent.', 'is-success');
+          setStatus('Payment confirmed. Click “Create Final Posters & Download” to generate your selected poster in two professional formats: Vertical (900×1285) and Banner (895×504). Download links will appear below, and a delivery email will be sent automatically.', 'is-success');
         });
       },
       onError: function(err){ setStatus('PayPal error: ' + err, 'is-error'); }
