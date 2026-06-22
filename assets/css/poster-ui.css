@@ -207,3 +207,97 @@ label.cmsg-file .cmmt-upload-hint {
     font-weight:700 !important;
     line-height:1.45 !important;
 }
+
+/* Poster Studio mobile dark-card label visibility */
+#cmmt-poster-form .cmmt-poster-step-card,
+#cmmt-poster-download-card.cmmt-poster-step-card {
+    background:#0f141c !important;
+    color:#f8fafc !important;
+    -webkit-text-fill-color:#f8fafc !important;
+}
+
+#cmmt-poster-form .cmmt-poster-step-card .cmsg-kicker,
+#cmmt-poster-download-card.cmmt-poster-step-card .cmsg-kicker {
+    color:#facc15 !important;
+    -webkit-text-fill-color:#facc15 !important;
+    display:block !important;
+    visibility:visible !important;
+    opacity:1 !important;
+}
+
+#cmmt-poster-form .cmmt-poster-step-card label,
+#cmmt-poster-form .cmmt-poster-step-card label > span,
+#cmmt-poster-form .cmmt-poster-step-card .cmsg-grid label,
+#cmmt-poster-form .cmmt-poster-step-card .cmsg-file > span,
+#cmmt-poster-form .cmmt-poster-step-card p,
+#cmmt-poster-form .cmmt-poster-step-card small,
+#cmmt-poster-download-card.cmmt-poster-step-card p {
+    display:block !important;
+    visibility:visible !important;
+    opacity:1 !important;
+    color:#f8fafc !important;
+    -webkit-text-fill-color:#f8fafc !important;
+    text-shadow:none !important;
+    background:transparent !important;
+}
+
+#cmmt-poster-form .cmmt-poster-step-card label,
+#cmmt-poster-form .cmmt-poster-step-card label > span,
+#cmmt-poster-form .cmmt-poster-step-card .cmsg-file > span {
+    font-size:14px !important;
+    font-weight:800 !important;
+    line-height:1.35 !important;
+    margin:0 0 8px !important;
+}
+
+#cmmt-poster-form .cmmt-poster-step-card input,
+#cmmt-poster-form .cmmt-poster-step-card select,
+#cmmt-poster-form .cmmt-poster-step-card textarea {
+    background:#ffffff !important;
+    color:#111827 !important;
+    -webkit-text-fill-color:#111827 !important;
+    border:1px solid #d1d5db !important;
+}
+
+#cmmt-poster-form .cmmt-poster-step-card input::placeholder,
+#cmmt-poster-form .cmmt-poster-step-card textarea::placeholder {
+    color:#6b7280 !important;
+    -webkit-text-fill-color:#6b7280 !important;
+    opacity:1 !important;
+}
+
+#cmmt-poster-form .cmmt-poster-step-card input[type="checkbox"] {
+    width:auto !important;
+    min-height:0 !important;
+    accent-color:#2563eb;
+}
+
+#cmmt-poster-form .cmmt-poster-step-card .cmmt-checkbox {
+    display:flex !important;
+    flex-direction:row !important;
+    align-items:center !important;
+    gap:10px !important;
+}
+
+#cmmt-poster-form .cmmt-poster-step-card .cmmt-checkbox span {
+    margin:0 !important;
+    color:#f8fafc !important;
+    -webkit-text-fill-color:#f8fafc !important;
+}
+
+#cmmt-poster-form .cmmt-poster-step-card .cmmt-upload-hint {
+    color:#7c2d12 !important;
+    -webkit-text-fill-color:#7c2d12 !important;
+}
+
+@media (max-width: 700px) {
+    #cmmt-poster-form .cmmt-poster-step-card {
+        padding:24px 16px !important;
+        border-radius:18px !important;
+    }
+
+    #cmmt-poster-form .cmmt-poster-step-card .cmsg-grid {
+        grid-template-columns:1fr !important;
+        gap:18px !important;
+    }
+}
