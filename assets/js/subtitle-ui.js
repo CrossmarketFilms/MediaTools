@@ -1,3 +1,38 @@
+window.CMSGSubtitleProgress = window.CMSGSubtitleProgress || {
+  infer: function(data, fallbackProgress) {
+    data = data || {};
+    var message = (data.message || data.raw_message || "").toString();
+    var progress = parseInt(data.progress || 0, 10);
+    var match = message.match(/^\[(\d{1,3})%\]\s*([\s\S]*)$/);
+
+    if (match) {
+      progress = parseInt(match[1], 10);
+      message = match[2] || "";
+    }
+
+    if (!progress && data.status === "completed") {
+      progress = 100;
+    } else if (!progress && data.status === "queued") {
+      progress = 10;
+    } else if (!progress && data.status === "processing") {
+      progress = fallbackProgress || 45;
+    }
+
+    progress = Math.max(0, Math.min(100, parseInt(progress || 0, 10)));
+
+    if (!message) {
+      message = data.status === "completed"
+        ? "Subtitle files are ready."
+        : "Processing subtitle job...";
+    }
+
+    return {
+      progress: progress,
+      message: message
+    };
+  }
+};
+
 /* ===== Crossmarket Option 2 Secure Large Upload UX - Clean Replacement ===== */
 (function($){
 "use strict";
@@ -317,15 +352,8 @@ if (!resp.success || !orderId) {
 
 var timer = setInterval(function(){
 
-  progress = Math.min(progress + 5, 95);
+  progress = Math.min(progress + 2, 94);
   setLargeProgress(progress);
-
-  if (progress >= 95) {
-    setLargeStatusText(
-      "Final closed-caption cue scan is running. Long feature films may remain here while audio cues are added to the VTT file.",
-      "is-info"
-    );
-  }
 
       postEncoded({
         action: "cmsg_job_status",
@@ -335,6 +363,10 @@ var timer = setInterval(function(){
 
         if (!resp.success || !resp.data) return;
 
+        var stage = window.CMSGSubtitleProgress.infer(resp.data, progress);
+        progress = Math.max(progress, stage.progress);
+        setLargeProgress(progress);
+
         if (resp.data.status === "completed") {
 
           clearInterval(timer);
@@ -342,7 +374,7 @@ var timer = setInterval(function(){
           state.isCompleted = true;
 
           setLargeProgress(100);
-          setLargeStatusText("Job completed, Your subtitle file is ready. Click the download button below or check your email for a download link.", "is-success");
+          setLargeStatusText(stage.message, "is-success");
 
           postEncoded({
   action: "cmsg_issue_download_grant",
@@ -418,6 +450,8 @@ if (grantResp.success && grantResp.data) {
           clearInterval(timer);
           state.isProcessing = false;
           setLargeStatusText(resp.data.message || "Job failed. Please contact support.", "is-error");
+        } else if (resp.data.status !== "completed") {
+          setLargeStatusText(stage.message, "is-working");
         }
 
       });
@@ -796,6 +830,110 @@ fd.append("caption_mode", $("#cmsg-upload-form [name='caption_mode']").val() || 
     }).then(r => r.json());
   }
 
+  function finalizeSmallPaidDraft(paymentToken) {
+    if (!smallState.draftId) {
+      return Promise.resolve({
+        success: false,
+        data: {
+          message: "Unable to start subtitle processing because the draft was not created."
+        }
+      });
+    }
+
+    return fetch((cmsgData && cmsgData.ajaxUrl) || ajaxurl, {
+      method: "POST",
+      headers: {"Content-Type":"application/x-www-form-urlencoded"},
+      body: new URLSearchParams({
+        action: "cmsg_finalize_paid_draft",
+        nonce: cmsgData.nonce,
+        draft_id: smallState.draftId,
+        payment_token: paymentToken
+      })
+    }).then(r => r.json());
+  }
+
+  function pollSmallJob(jobId) {
+    var progress = 10;
+
+    $("#cmsg-upload-status").text("Payment confirmed. Job received and queued for processing.");
+
+    var poller = setInterval(function(){
+      fetch((cmsgData && cmsgData.ajaxUrl) || ajaxurl, {
+        method: "POST",
+        headers: {"Content-Type":"application/x-www-form-urlencoded"},
+        body: new URLSearchParams({
+          action: "cmsg_job_status",
+          nonce: cmsgData.nonce,
+          job_id: jobId
+        })
+      })
+      .then(r => r.json())
+      .then(function(resp){
+        if (!resp.success || !resp.data) return;
+
+        var stage = window.CMSGSubtitleProgress.infer(resp.data, progress);
+        progress = Math.max(progress, stage.progress);
+        $("#cmsg-upload-status").text(stage.message);
+
+        if (resp.data.status === "completed") {
+          clearInterval(poller);
+
+          fetch((cmsgData && cmsgData.ajaxUrl) || ajaxurl, {
+            method: "POST",
+            headers: {"Content-Type":"application/x-www-form-urlencoded"},
+            body: new URLSearchParams({
+              action: "cmsg_issue_download_grant",
+              nonce: cmsgData.nonce,
+              job_id: jobId
+            })
+          })
+          .then(r => r.json())
+          .then(function(grantResp){
+            if (!grantResp.success || !grantResp.data) {
+              return;
+            }
+
+            var srtUrl = grantResp.data.srt_download_url || grantResp.data.download_url || "";
+            var vttUrl = grantResp.data.vtt_download_url || "";
+
+            if (srtUrl) {
+              if (!$("#cmsg-download-link").length) {
+                $("#cmsg-upload-status").after(
+                  '<div id="cmsg-download-wrap" style="margin-top:15px;"><a href="#" id="cmsg-download-link" class="cmsg-btn">Download SRT Subtitle File</a></div>'
+                );
+              }
+
+              $("#cmsg-download-link")
+                .attr("href", srtUrl)
+                .attr("download", "")
+                .removeAttr("target")
+                .show();
+            }
+
+            if (vttUrl) {
+              if (!$("#cmsg-vtt-download-link").length) {
+                $("#cmsg-download-link").after(
+                  '<a href="#" id="cmsg-vtt-download-link" class="cmsg-btn cmsg-btn--primary" style="margin-left:18px; display:inline-flex; align-items:center; justify-content:center; visibility:visible; opacity:1; pointer-events:auto;">Download VTT Closed Caption File</a>'
+                );
+              }
+
+              $("#cmsg-vtt-download-link")
+                .attr("href", vttUrl)
+                .attr("download", "")
+                .removeAttr("target")
+                .show();
+            }
+          });
+        }
+
+        if (resp.data.status === "failed") {
+          clearInterval(poller);
+          $("#cmsg-upload-status").text(resp.data.message || "Processing failed.");
+        }
+      });
+    }, 5000);
+  }
+
   function renderSmallPayPal() {
 
 var container = $('#cmsg-upload-form').find('#cmsg-paypal-buttons, .cmsg-paypal-buttons').first();
@@ -820,12 +958,20 @@ container.data("rendered", true);
 
       createOrder: function() {
         return createSmallDraft().then(function(draft){
+          if (!draft || !draft.success || !draft.data || !draft.data.draft_id) {
+            throw new Error((draft && draft.data && draft.data.message) || "Unable to create subtitle draft.");
+          }
+
           smallState.draftId = draft.data.draft_id;
           return createOrder(smallState.draftId);
         });
       },
 
 onApprove: function(data) {
+  if (!smallState.draftId) {
+    $("#cmsg-upload-status").text("Unable to start subtitle processing because the draft was not created.");
+    return;
+  }
 
   return captureOrder(smallState.draftId, data.orderID)
     .then(function(captureResp){
@@ -839,94 +985,14 @@ onApprove: function(data) {
 
       var paymentToken = captureResp.data.payment_token;
 
-      var poller = setInterval(function(){
-
-        fetch((cmsgData && cmsgData.ajaxUrl) || ajaxurl, {
-          method: "POST",
-          headers: {"Content-Type":"application/x-www-form-urlencoded"},
-          body: new URLSearchParams({
-            action: "cmsg_finalize_paid_draft",
-            nonce: cmsgData.nonce,
-            payment_token: paymentToken
-          })
-        })
-        .then(r => r.json())
-        .then(function(resp){
-
-          if (!resp.success || !resp.data) {
-            return;
-          }
-
-          if (resp.data.status === "completed") {
-
-            clearInterval(poller);
-
-            $("#cmsg-upload-status")
-              .text("Job completed. Your subtitle file is ready.");
-
-            fetch((cmsgData && cmsgData.ajaxUrl) || ajaxurl, {
-              method: "POST",
-              headers: {"Content-Type":"application/x-www-form-urlencoded"},
-              body: new URLSearchParams({
-                action: "cmsg_issue_download_grant",
-                nonce: cmsgData.nonce,
-                job_id: resp.data.job_id
-              })
-            })
-            .then(r => r.json())
-            .then(function(grantResp){
-
-              if (!grantResp.success || !grantResp.data) {
-                return;
-              }
-
-              var srtUrl = grantResp.data.srt_download_url || grantResp.data.download_url || "";
-              var vttUrl = grantResp.data.vtt_download_url || "";
-
-              if (srtUrl) {
-
-                if (!$("#cmsg-download-link").length) {
-                  $("#cmsg-upload-status").after(
-                    '<div id="cmsg-download-wrap" style="margin-top:15px;"><a href="#" id="cmsg-download-link" class="cmsg-btn">Download SRT Subtitle File</a></div>'
-                  );
-                }
-
-                $("#cmsg-download-link")
-                  .attr("href", srtUrl)
-                  .attr("download", "")
-                  .removeAttr("target")
-                  .show();
-              }
-
-              if (vttUrl) {
-
-                if (!$("#cmsg-vtt-download-link").length) {
-                  $("#cmsg-download-link").after(
-'<a href="#" id="cmmt-large-vtt-download-link" class="cmsg-btn cmsg-btn--primary" style="margin-left:18px; display:inline-flex; align-items:center; justify-content:center; visibility:visible; opacity:1; pointer-events:auto;">'
-                  );
-                }
-
-                $("#cmsg-vtt-download-link")
-                  .attr("href", vttUrl)
-                  .attr("download", "")
-                  .removeAttr("target")
-                  .show();
-              }
-
-            });
-
-          }
-
-          if (resp.data.status === "failed") {
-            clearInterval(poller);
-
-            $("#cmsg-upload-status")
-              .text(resp.data.message || "Processing failed.");
-          }
-
-        });
-
-      }, 5000);
+      return finalizeSmallPaidDraft(paymentToken).then(function(finalResp){
+        if (finalResp && finalResp.success && finalResp.data && finalResp.data.job_id) {
+          pollSmallJob(finalResp.data.job_id);
+        } else {
+          var finalMessage = finalResp && finalResp.data && finalResp.data.message;
+          $("#cmsg-upload-status").text(finalMessage || "Unable to start subtitle processing.");
+        }
+      });
 
     });
 }
@@ -1107,11 +1173,15 @@ function setDriveProgress(percent) {
 
         if (!resp.success || !resp.data) return;
 
+        var stage = window.CMSGSubtitleProgress.infer(resp.data, progress);
+        progress = Math.max(progress, stage.progress);
+        setDriveProgress(progress);
+
         if (resp.data.status === "completed") {
           clearInterval(timer);
 
           setDriveProgress(100);
-          setDriveStatus("Job completed. Your subtitle file is ready. Click the download button below or check your email for a download link.", "is-success");
+          setDriveStatus(stage.message, "is-success");
 
           postDrive({
             action: "cmsg_issue_download_grant",
@@ -1168,6 +1238,8 @@ if (grantResp.success && grantResp.data) {
         if (resp.data.status === "failed") {
           clearInterval(timer);
           setDriveStatus(resp.data.message || "Google Drive job failed. Please contact support.", "is-error");
+        } else if (resp.data.status !== "completed") {
+          setDriveStatus(stage.message, "is-working");
         }
 
       });

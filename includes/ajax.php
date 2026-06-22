@@ -6,6 +6,34 @@ private static function subtitle_amount($runtime_minutes) {
     return round((float) $runtime_minutes * (float) CMSG_Plugin::settings()['subtitle_price_per_minute'], 2);
 }
 
+private static function subtitle_progress_from_log($log_text, $status = '') {
+    $log_text = trim((string)$log_text);
+    $progress = 0;
+    $message = $log_text;
+
+    if (preg_match('/^\[(\d{1,3})%\]\s*(.*)$/s', $log_text, $matches)) {
+        $progress = max(0, min(100, (int)$matches[1]));
+        $message = trim($matches[2]);
+    } elseif ($status === 'completed') {
+        $progress = 100;
+    } elseif ($status === 'queued') {
+        $progress = 10;
+    } elseif ($status === 'processing') {
+        $progress = 45;
+    }
+
+    if ($message === '') {
+        $message = $status === 'completed'
+            ? 'Subtitle files are ready.'
+            : 'Processing subtitle job...';
+    }
+
+    return [
+        'progress' => $progress,
+        'message' => $message,
+    ];
+}
+
 public static function create_draft() {
     check_ajax_referer('cmsg_nonce', 'nonce');
 
@@ -172,7 +200,15 @@ wp_send_json_success([
     public static function list_server_files() { check_ajax_referer('cmsg_nonce', 'nonce'); wp_send_json_success(['files'=>CMSG_File_Browser::list_files()]); }
     public static function job_status() {
         check_ajax_referer('cmsg_nonce', 'nonce'); $job=CMSG_Jobs::get_job((int)($_POST['job_id'] ?? 0)); if(!$job) wp_send_json_error(['message'=>'Job not found.'],404);
-        wp_send_json_success(['status'=>$job->status,'message'=>$job->log_text,'can_download'=>($job->payment_status==='paid' && $job->status==='completed')]);
+        $progress = self::subtitle_progress_from_log($job->log_text, $job->status);
+        wp_send_json_success([
+            'status'=>$job->status,
+            'message'=>$progress['message'],
+            'progress'=>$progress['progress'],
+            'raw_message'=>$job->log_text,
+            'caption_mode'=> isset($job->caption_mode) ? $job->caption_mode : 'subtitle',
+            'can_download'=>($job->payment_status==='paid' && $job->status==='completed')
+        ]);
     }
     public static function detect_server_file_runtime() {
         check_ajax_referer('cmsg_nonce', 'nonce');

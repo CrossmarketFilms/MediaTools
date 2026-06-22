@@ -21,7 +21,7 @@ final class CMSG_Jobs {
             'caption_mode'=>sanitize_text_field($draft->caption_mode ?? 'subtitle'),
             'requester_email'=>$draft->request_email,'minutes_estimate'=>$draft->runtime_minutes,
             'estimated_price'=>$draft->amount,'payment_status'=>'paid','draft_id'=>$draft->id,'payment_authorization_id'=>$authorization_id,
-            'log_text'=>'Payment authorized. Job queued for processing.',
+            'log_text'=>'[10%] Payment confirmed. Job received and queued for processing.',
         ]);
         $job_id = (int)$wpdb->insert_id;
         if ($job_id) wp_schedule_single_event(time() + 10, 'cmsg_process_job', [$job_id]);

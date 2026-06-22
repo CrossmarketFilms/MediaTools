@@ -3,6 +3,34 @@ if (!defined('ABSPATH')) { exit; }
 
 final class CMSG_Processor {
 
+    private static function progress_message($percent, $message) {
+        return '[' . intval($percent) . '%] ' . $message;
+    }
+
+    private static function update_progress($job_id, $percent, $message, $extra = []) {
+        $data = array_merge([
+            'log_text' => self::progress_message($percent, $message),
+        ], $extra);
+
+        CMSG_Jobs::update_job($job_id, $data);
+    }
+
+    private static function is_closed_caption_mode($job) {
+        return isset($job->caption_mode) && (string)$job->caption_mode === 'closed_caption';
+    }
+
+    private static function final_ready_message($job, $email_sent) {
+        if (!$email_sent) {
+            return 'Subtitle files are ready. Email delivery could not be confirmed, but download links are available below.';
+        }
+
+        if (self::is_closed_caption_mode($job)) {
+            return 'Closed Caption files are ready. SRT and VTT files include caption formatting where available, and a delivery email has been sent.';
+        }
+
+        return 'Subtitle files are ready. SRT and VTT download links are available, and a delivery email has been sent.';
+    }
+
     public static function resolve_video_path($job) {
         $video_path = '';
 
@@ -212,6 +240,7 @@ $message .= "Crossmarket Films";
         $content = str_replace(',', '.', $content);
 
         file_put_contents($vtt_path, "WEBVTT\n\n" . $content);
+        @chmod($vtt_path, 0664);
 
         return $vtt_path;
     }
@@ -261,9 +290,8 @@ $message .= "Crossmarket Films";
             return;
         }
 
-        CMSG_Jobs::update_job($job_id, [
+        self::update_progress($job_id, 20, 'Preparing media file for subtitle processing.', [
             'status' => 'processing',
-            'log_text' => 'Starting subtitle generation...'
         ]);
 
         $resolved_video_path = self::resolve_video_path($job);
@@ -285,9 +313,7 @@ $message .= "Crossmarket Films";
         }
 
         if (!empty($job->storage_provider) && $job->storage_provider === 'gcs') {
-            CMSG_Jobs::update_job($job_id, [
-                'log_text' => 'Starting subtitle generation. Downloaded GCS object to local cache: ' . $resolved_video_path
-            ]);
+            self::update_progress($job_id, 20, 'Preparing media file. Downloaded cloud upload to local processing cache.');
         }
 
         $s = CMSG_Plugin::settings();
@@ -302,6 +328,9 @@ $message .= "Crossmarket Films";
         $mode = escapeshellarg($s['whisper_mode']);
 
         $command = "{$python} {$script} --video {$video} --language {$lang} --model {$model} --ffmpeg {$ffmpeg} --mode {$mode} 2>&1";
+
+        self::update_progress($job_id, 30, 'Extracting audio and preparing speech recognition.');
+        self::update_progress($job_id, 45, 'Running speech recognition. Longer videos may remain on this step while transcription completes.');
 
         $output = [];
         $return_var = 0;
@@ -333,6 +362,8 @@ $message .= "Crossmarket Films";
             return;
         }
 
+        self::update_progress($job_id, 65, 'Building transcript segments from speech recognition output.');
+
         $caption_mode = isset($job->caption_mode) ? (string) $job->caption_mode : 'subtitle';
 
 $output_language = !empty($job->output_language) ? (string) $job->output_language : 'same';
@@ -348,6 +379,8 @@ $should_translate = (
 $translation_note = '';
 
 if ($source_language === 'yo' && file_exists($srt)) {
+    self::update_progress($job_id, 75, 'Applying localization cleanup before final subtitle formatting.');
+
     $cleaned_yoruba_srt = preg_replace('/\.srt$/i', '-yo-cleaned.srt', $srt);
 
     $cleanup_script = escapeshellarg(CMSG_DIR . 'bin/cleanup_yoruba_srt.py');
@@ -370,6 +403,8 @@ if ($source_language === 'yo' && file_exists($srt)) {
 }
 
 if ($should_translate && file_exists($srt)) {
+    self::update_progress($job_id, 75, 'Applying translation/localization to subtitle segments.');
+
     $translated_srt = preg_replace('/\.srt$/i', '-' . sanitize_file_name($output_language) . '.srt', $srt);
 
     $translate_script = escapeshellarg(CMSG_DIR . 'bin/translate_srt.py');
@@ -413,30 +448,40 @@ if ($output_language === 'yo' && file_exists($srt)) {
         $translation_note = "\nTranslation requested but failed:\n" . implode("\n", $translate_output_lines);
     }
 }
-        $update = [
-            'status' => 'completed',
-            'srt_path' => $srt,
-            'log_text' => 'Subtitle file is ready. A download link has been sent to your email. You may also download it from the dashboard here.' . $translation_note
-        ];
+        self::update_progress($job_id, 85, 'Formatting subtitle timestamps.');
+        self::update_progress($job_id, 90, 'Creating SRT file.');
 
-if ($caption_mode === 'closed_caption') {
-    $vtt = self::create_vtt_from_srt($srt);
+        @chmod($srt, 0664);
 
-    if (!empty($vtt)) {
-        $cue_result = self::add_basic_detected_cues_to_vtt($vtt, $resolved_video_path);
+        self::update_progress($job_id, 93, 'Creating VTT file.');
+        $vtt = self::create_vtt_from_srt($srt);
 
-        $update['vtt_path'] = $vtt;
+if ($caption_mode === 'closed_caption' && !empty($vtt)) {
+    self::update_progress($job_id, 95, 'Adding closed-caption cues to VTT file.');
 
-        if ($cue_result) {
-            $update['log_text'] = 'Closed Caption Mode completed. VTT generated with basic detected audio cues; SRT is also available.' . $translation_note;
-        } else {
-            $update['log_text'] = 'Closed Caption Mode completed. Basic VTT generated; audio cue detection was skipped.' . $translation_note;
-        }
+    $cue_result = self::add_basic_detected_cues_to_vtt($vtt, $resolved_video_path);
+
+    if (!$cue_result) {
+        $translation_note .= "\nClosed-caption cue detection was skipped or unavailable; SRT and VTT files were still created.";
     }
 }
-        CMSG_Jobs::update_job($job_id, $update);
 
-        self::send_completion_email($job_id, $srt);
+        self::update_progress($job_id, 97, 'Saving final subtitle files.', [
+            'srt_path' => $srt,
+            'vtt_path' => !empty($vtt) ? $vtt : '',
+        ]);
+
+        self::update_progress($job_id, 98, 'Preparing secure download links.');
+        self::update_progress($job_id, 99, 'Sending delivery email.');
+
+        $email_sent = self::send_completion_email($job_id, $srt);
+
+        CMSG_Jobs::update_job($job_id, [
+            'status' => 'completed',
+            'srt_path' => $srt,
+            'vtt_path' => !empty($vtt) ? $vtt : '',
+            'log_text' => self::progress_message(100, self::final_ready_message($job, $email_sent) . $translation_note),
+        ]);
     }
 private static function add_basic_detected_cues_to_vtt($vtt_path, $video_path) {
     if (empty($vtt_path) || !file_exists($vtt_path)) {
