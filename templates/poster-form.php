@@ -100,7 +100,9 @@
         <label class="cmsg-file cmmt-wide">
           <span>Props, Logos & Visual References</span>
           <p class="cmmt-upload-hint">
-            Do not upload actor photos here. Use Principal Cast for actors. Upload only props, logos, objects, vehicles, buildings, products, or visual references that should appear in the final poster.
+            ⚠️ <strong>Do NOT upload actor photos here.</strong><br>
+Use <strong>Principal Cast</strong> for actors.<br>
+Upload only props, logos, objects, vehicles, buildings, products, or visual references that should appear in the final poster.
           </p>
           <input type="file" name="poster_assets[]" id="cmmt-poster-assets" multiple accept="image/jpeg,image/png,image/webp">
           <small>Accepted image formats: JPG, JPEG, PNG, and WEBP only.</small>
