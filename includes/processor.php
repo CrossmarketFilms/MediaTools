@@ -15,6 +15,44 @@ final class CMSG_Processor {
         CMSG_Jobs::update_job($job_id, $data);
     }
 
+    public static function retry_available_message() {
+        return 'Your subtitle request could not be completed due to a processing issue. Your payment has been preserved and you may retry this job at no additional cost.';
+    }
+
+    public static function unsupported_language_retry_message() {
+        return "The selected spoken language is not directly supported.\nYour payment has been preserved.\nPlease retry after updating language settings.";
+    }
+
+    private static function mark_retry_available($job_id, $reason, $percent = 95) {
+        $reason = trim((string)$reason);
+
+        if ($reason === '') {
+            $reason = 'Unknown subtitle processing error.';
+        }
+
+        CMSG_Jobs::update_job($job_id, [
+            'status' => 'retry_available',
+            'log_text' => self::progress_message($percent, self::retry_available_message()) . "\nOriginal failure reason:\n" . $reason,
+        ]);
+    }
+
+    private static function is_unsupported_language_failure($reason) {
+        $reason = strtolower((string)$reason);
+
+        return strpos($reason, 'not a valid language code') !== false
+            || strpos($reason, 'unsupported language') !== false
+            || strpos($reason, 'language is not supported') !== false;
+    }
+
+    private static function mark_unsupported_language_retry_available($job_id, $reason) {
+        error_log('CMSG SUBTITLE UNSUPPORTED LANGUAGE FAILURE: ' . trim((string)$reason));
+
+        CMSG_Jobs::update_job($job_id, [
+            'status' => 'retry_available',
+            'log_text' => self::unsupported_language_retry_message(),
+        ]);
+    }
+
     private static function is_closed_caption_mode($job) {
         return isset($job->caption_mode) && (string)$job->caption_mode === 'closed_caption';
     }
@@ -29,6 +67,69 @@ final class CMSG_Processor {
         }
 
         return 'Subtitle files are ready. SRT and VTT download links are available, and a delivery email has been sent.';
+    }
+
+    private static function normalize_language_code($language, $fallback = 'auto') {
+        $language = strtolower(trim((string)$language));
+        $language = preg_replace('/[^a-z_-]/', '', $language);
+
+        return $language !== '' ? $language : $fallback;
+    }
+
+    private static function faster_whisper_source_languages() {
+        return [
+            'en' => true,
+            'es' => true,
+            'fr' => true,
+            'yo' => true,
+            'ha' => true,
+            'sw' => true,
+            'zh' => true,
+            'ja' => true,
+            'hi' => true,
+            'pt' => true,
+            'de' => true,
+            'it' => true,
+            'ar' => true,
+            'ko' => true,
+            'ta' => true,
+            'te' => true,
+            'pa' => true,
+            'nl' => true,
+            'ru' => true,
+            'tr' => true,
+        ];
+    }
+
+    private static function resolve_faster_whisper_language($selected_language) {
+        $selected_language = self::normalize_language_code($selected_language);
+
+        if ($selected_language === 'auto') {
+            return [
+                'selected' => 'auto',
+                'transcription' => 'auto',
+                'is_supported' => true,
+                'message' => '',
+            ];
+        }
+
+        $supported = self::faster_whisper_source_languages();
+
+        if (isset($supported[$selected_language])) {
+            return [
+                'selected' => $selected_language,
+                'transcription' => $selected_language,
+                'is_supported' => true,
+                'message' => '',
+            ];
+        }
+
+        return [
+            'selected' => $selected_language,
+            'transcription' => 'auto',
+            'is_supported' => false,
+            'message' => 'Selected spoken language is not directly supported by faster-whisper. Using auto-detect transcription.',
+        ];
     }
 
     public static function resolve_video_path($job) {
@@ -270,6 +371,14 @@ $message .= "Crossmarket Films";
     }
 
     public static function process_job($job_id) {
+        try {
+            self::process_job_internal($job_id);
+        } catch (Throwable $e) {
+            self::mark_retry_available($job_id, $e->getMessage());
+        }
+    }
+
+    private static function process_job_internal($job_id) {
         $job = CMSG_Jobs::get_job($job_id);
 
         if (!$job) {
@@ -297,18 +406,12 @@ $message .= "Crossmarket Films";
         $resolved_video_path = self::resolve_video_path($job);
 
         if (is_wp_error($resolved_video_path)) {
-            CMSG_Jobs::update_job($job_id, [
-                'status' => 'failed',
-                'log_text' => $resolved_video_path->get_error_message()
-            ]);
+            self::mark_retry_available($job_id, $resolved_video_path->get_error_message(), 20);
             return;
         }
 
         if (empty($resolved_video_path) || !file_exists($resolved_video_path)) {
-            CMSG_Jobs::update_job($job_id, [
-                'status' => 'failed',
-                'log_text' => 'Subtitle generation failed. Video file not found: ' . $resolved_video_path
-            ]);
+            self::mark_retry_available($job_id, 'Subtitle generation failed. Video file not found: ' . $resolved_video_path, 20);
             return;
         }
 
@@ -321,15 +424,26 @@ $message .= "Crossmarket Films";
         $python = escapeshellcmd($s['python_binary']);
         $script = escapeshellarg(CMSG_DIR . 'bin/generate_subtitles.py');
         $video = escapeshellarg($resolved_video_path);
-        $source_language = !empty($job->source_language) ? $job->source_language : (!empty($job->language_code) ? $job->language_code : 'auto');
-        $lang = escapeshellarg($source_language);
+        $source_language = self::normalize_language_code(!empty($job->source_language) ? $job->source_language : (!empty($job->language_code) ? $job->language_code : 'auto'));
+        $language_resolution = self::resolve_faster_whisper_language($source_language);
+        $language_arg = '';
+
+        if ($language_resolution['transcription'] !== 'auto') {
+            $language_arg = ' --language ' . escapeshellarg($language_resolution['transcription']);
+        }
+
         $model = escapeshellarg(!empty($job->model_size) ? $job->model_size : $s['default_model']);
         $ffmpeg = escapeshellarg($s['ffmpeg_binary']);
         $mode = escapeshellarg($s['whisper_mode']);
 
-        $command = "{$python} {$script} --video {$video} --language {$lang} --model {$model} --ffmpeg {$ffmpeg} --mode {$mode} 2>&1";
+        $command = "{$python} {$script} --video {$video}{$language_arg} --model {$model} --ffmpeg {$ffmpeg} --mode {$mode} 2>&1";
 
         self::update_progress($job_id, 30, 'Extracting audio and preparing speech recognition.');
+
+        if (!$language_resolution['is_supported'] && $language_resolution['message'] !== '') {
+            self::update_progress($job_id, 30, $language_resolution['message']);
+        }
+
         self::update_progress($job_id, 45, 'Running speech recognition. Longer videos may remain on this step while transcription completes.');
 
         $output = [];
@@ -339,10 +453,12 @@ $message .= "Crossmarket Films";
         $log = implode("\n", $output);
 
         if ($return_var !== 0) {
-            CMSG_Jobs::update_job($job_id, [
-                'status' => 'failed',
-                'log_text' => "Subtitle generation failed.\n" . $log
-            ]);
+            if (self::is_unsupported_language_failure($log)) {
+                self::mark_unsupported_language_retry_available($job_id, $log);
+                return;
+            }
+
+            self::mark_retry_available($job_id, "Subtitle generation failed.\n" . $log, 45);
             return;
         }
 
@@ -355,10 +471,7 @@ $message .= "Crossmarket Films";
         }
 
         if (empty($srt) || !file_exists($srt)) {
-            CMSG_Jobs::update_job($job_id, [
-                'status' => 'failed',
-                'log_text' => 'Subtitle generation failed. No SRT output was created.'
-            ]);
+            self::mark_retry_available($job_id, 'Subtitle generation failed. No SRT output was created.', 65);
             return;
         }
 
@@ -366,7 +479,7 @@ $message .= "Crossmarket Films";
 
         $caption_mode = isset($job->caption_mode) ? (string) $job->caption_mode : 'subtitle';
 
-$output_language = !empty($job->output_language) ? (string) $job->output_language : 'same';
+$output_language = self::normalize_language_code(!empty($job->output_language) ? (string) $job->output_language : 'same', 'same');
 $translation_mode = !empty($job->translation_mode) ? (string) $job->translation_mode : 'none';
 
 $should_translate = (
@@ -445,7 +558,8 @@ if ($output_language === 'yo' && file_exists($srt)) {
 }
 
  } else {
-        $translation_note = "\nTranslation requested but failed:\n" . implode("\n", $translate_output_lines);
+        self::mark_retry_available($job_id, "Translation requested but failed:\n" . implode("\n", $translate_output_lines), 75);
+        return;
     }
 }
         self::update_progress($job_id, 85, 'Formatting subtitle timestamps.');

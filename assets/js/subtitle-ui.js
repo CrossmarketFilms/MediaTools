@@ -33,6 +33,20 @@ window.CMSGSubtitleProgress = window.CMSGSubtitleProgress || {
   }
 };
 
+window.CMSGRetrySubtitleJob = window.CMSGRetrySubtitleJob || function(jobId) {
+  return fetch((window.cmsgData && window.cmsgData.ajaxUrl) || window.ajaxurl, {
+    method: "POST",
+    headers: {"Content-Type":"application/x-www-form-urlencoded"},
+    body: new URLSearchParams({
+      action: "cmsg_retry_subtitle_job",
+      nonce: (window.cmsgData && window.cmsgData.nonce) || "",
+      job_id: jobId
+    })
+  }).then(function(response) {
+    return response.json();
+  });
+};
+
 /* ===== Crossmarket Option 2 Secure Large Upload UX - Clean Replacement ===== */
 (function($){
 "use strict";
@@ -76,6 +90,32 @@ $(function(){
     box.removeClass("is-working is-success is-error");
     if (stateClass) box.addClass(stateClass);
     box.text(message);
+  }
+
+  function renderLargeRetry(jobId, message) {
+    setLargeStatusText(message, "is-error");
+    $("#cmmt-large-retry-job").remove();
+    $("#cmmt-large-upload-status").after(
+      '<button type="button" id="cmmt-large-retry-job" class="cmsg-btn cmsg-btn--primary" style="margin-top:12px;">Retry Job</button>'
+    );
+
+    $("#cmmt-large-retry-job").off("click").on("click", function() {
+      var btn = $(this);
+      btn.prop("disabled", true).text("Retrying...");
+      window.CMSGRetrySubtitleJob(jobId).then(function(resp) {
+        if (resp && resp.success) {
+          btn.remove();
+          setLargeStatusText("Retry started. Your existing payment and upload are being reused.", "is-working");
+          pollJob(jobId);
+        } else {
+          btn.prop("disabled", false).text("Retry Job");
+          setLargeStatusText((resp && resp.data && resp.data.message) || "Retry could not be started. Please contact support.", "is-error");
+        }
+      }).catch(function() {
+        btn.prop("disabled", false).text("Retry Job");
+        setLargeStatusText("Retry could not be started. Please contact support.", "is-error");
+      });
+    });
   }
 
   function enablePayPal() {
@@ -184,11 +224,8 @@ fd.append("caption_mode", $("#cmmt-large-upload-form [name='caption_mode']").val
 
     fd.append("request_email", $('#cmmt-large-upload-form [name="request_email"]').val() || "");
     fd.append("runtime_minutes", $('#cmmt-large-upload-form [name="runtime_minutes"]').val() || "");
-fd.append("language_code", $('#cmmt-large-upload-form [name="language_code"]').val() || "auto");
-
 fd.append("source_language", $('#cmmt-large-upload-form [name="source_language"]').val() || "auto");
 fd.append("output_language", $('#cmmt-large-upload-form [name="output_language"]').val() || "same");
-fd.append("translation_mode", $('#cmmt-large-upload-form [name="translation_mode"]').val() || "none");
 
 
 fd.append("model_size", $('#cmmt-large-upload-form [name="model_size"]').val() || "small");
@@ -341,6 +378,7 @@ if (!resp.success || !orderId) {
 
     state.jobId = jobId;
     state.isProcessing = true;
+    $("#cmmt-large-retry-job").remove();
 
     var progress = 10;
     setLargeProgress(progress);
@@ -446,7 +484,11 @@ if (grantResp.success && grantResp.data) {
 });
         }
 
-        if (resp.data.status === "failed") {
+        if (resp.data.status === "retry_available") {
+          clearInterval(timer);
+          state.isProcessing = false;
+          renderLargeRetry(jobId, stage.message);
+        } else if (resp.data.status === "failed") {
           clearInterval(timer);
           state.isProcessing = false;
           setLargeStatusText(resp.data.message || "Job failed. Please contact support.", "is-error");
@@ -852,9 +894,36 @@ fd.append("caption_mode", $("#cmsg-upload-form [name='caption_mode']").val() || 
     }).then(r => r.json());
   }
 
+  function renderSmallRetry(jobId, message) {
+    $("#cmsg-upload-status").text(message);
+    $("#cmsg-retry-job").remove();
+    $("#cmsg-upload-status").after(
+      '<button type="button" id="cmsg-retry-job" class="cmsg-btn cmsg-btn--primary" style="margin-top:12px;">Retry Job</button>'
+    );
+
+    $("#cmsg-retry-job").off("click").on("click", function() {
+      var btn = $(this);
+      btn.prop("disabled", true).text("Retrying...");
+      window.CMSGRetrySubtitleJob(jobId).then(function(resp) {
+        if (resp && resp.success) {
+          btn.remove();
+          $("#cmsg-upload-status").text("Retry started. Your existing payment and upload are being reused.");
+          pollSmallJob(jobId);
+        } else {
+          btn.prop("disabled", false).text("Retry Job");
+          $("#cmsg-upload-status").text((resp && resp.data && resp.data.message) || "Retry could not be started. Please contact support.");
+        }
+      }).catch(function() {
+        btn.prop("disabled", false).text("Retry Job");
+        $("#cmsg-upload-status").text("Retry could not be started. Please contact support.");
+      });
+    });
+  }
+
   function pollSmallJob(jobId) {
     var progress = 10;
 
+    $("#cmsg-retry-job").remove();
     $("#cmsg-upload-status").text("Payment confirmed. Job received and queued for processing.");
 
     var poller = setInterval(function(){
@@ -926,7 +995,10 @@ fd.append("caption_mode", $("#cmsg-upload-form [name='caption_mode']").val() || 
           });
         }
 
-        if (resp.data.status === "failed") {
+        if (resp.data.status === "retry_available") {
+          clearInterval(poller);
+          renderSmallRetry(jobId, stage.message);
+        } else if (resp.data.status === "failed") {
           clearInterval(poller);
           $("#cmsg-upload-status").text(resp.data.message || "Processing failed.");
         }
@@ -1042,6 +1114,32 @@ jQuery(function($){
     box.text(message);
   }
 
+  function renderDriveRetry(jobId, message) {
+    setDriveStatus(message, "is-error");
+    $("#cmmt-drive-retry-job").remove();
+    $("#cmmt-drive-status").after(
+      '<button type="button" id="cmmt-drive-retry-job" class="cmsg-btn cmsg-btn--primary" style="margin-top:12px;">Retry Job</button>'
+    );
+
+    $("#cmmt-drive-retry-job").off("click").on("click", function() {
+      var btn = $(this);
+      btn.prop("disabled", true).text("Retrying...");
+      window.CMSGRetrySubtitleJob(jobId).then(function(resp) {
+        if (resp && resp.success) {
+          btn.remove();
+          setDriveStatus("Retry started. Your existing payment and Google Drive source are being reused.", "is-working");
+          pollDriveJob(jobId);
+        } else {
+          btn.prop("disabled", false).text("Retry Job");
+          setDriveStatus((resp && resp.data && resp.data.message) || "Retry could not be started. Please contact support.", "is-error");
+        }
+      }).catch(function() {
+        btn.prop("disabled", false).text("Retry Job");
+        setDriveStatus("Retry could not be started. Please contact support.", "is-error");
+      });
+    });
+  }
+
   function postDrive(data) {
     return fetch(driveAjaxUrl(), {
       method: "POST",
@@ -1067,7 +1165,6 @@ function createDriveDraft() {
 
   fd.append("source_language", $("#cmmt-drive-form [name='source_language']").val() || "auto");
   fd.append("output_language", $("#cmmt-drive-form [name='output_language']").val() || "same");
-  fd.append("translation_mode", $("#cmmt-drive-form [name='translation_mode']").val() || "none");
   fd.append("model_size", $("#cmmt-drive-form [name='model_size']").val() || "small");
 
   fd.append("drive_url", driveLink);
@@ -1160,6 +1257,7 @@ function setDriveProgress(percent) {
   function pollDriveJob(jobId) {
   var progress = 25;
   setDriveProgress(progress);
+  $("#cmmt-drive-retry-job").remove();
 
     setDriveStatus("Payment received. Your Google Drive file is being processed. A download button will appear below once processing is complete.", "is-success");
 
@@ -1235,7 +1333,10 @@ if (grantResp.success && grantResp.data) {
           });
         }
 
-        if (resp.data.status === "failed") {
+        if (resp.data.status === "retry_available") {
+          clearInterval(timer);
+          renderDriveRetry(jobId, stage.message);
+        } else if (resp.data.status === "failed") {
           clearInterval(timer);
           setDriveStatus(resp.data.message || "Google Drive job failed. Please contact support.", "is-error");
         } else if (resp.data.status !== "completed") {

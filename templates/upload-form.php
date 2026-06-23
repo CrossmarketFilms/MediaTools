@@ -1,4 +1,89 @@
 <?php if (!defined('ABSPATH')) { exit; } ?>
+<?php
+$cmsg_source_languages = [
+    'auto' => 'Auto Detect (Recommended)',
+    'en' => 'English',
+    'es' => 'Spanish',
+    'fr' => 'French',
+    'yo' => 'Yoruba',
+    'ha' => 'Hausa',
+    'sw' => 'Swahili',
+    'zh' => 'Mandarin Chinese',
+    'ja' => 'Japanese',
+    'hi' => 'Hindi',
+    'ig' => 'Igbo (auto-detect transcription)',
+    'pt' => 'Portuguese',
+    'de' => 'German',
+    'it' => 'Italian',
+    'ar' => 'Arabic',
+    'ko' => 'Korean',
+    'ta' => 'Tamil',
+    'te' => 'Telugu',
+    'pa' => 'Punjabi',
+    'nl' => 'Dutch',
+    'ru' => 'Russian',
+    'tr' => 'Turkish',
+];
+
+$cmsg_output_languages = [
+    'same' => 'Same as Spoken Language (No Translation)',
+    'en' => 'English',
+    'es' => 'Spanish',
+    'fr' => 'French',
+    'yo' => 'Yoruba',
+    'ig' => 'Igbo',
+    'ha' => 'Hausa',
+    'sw' => 'Swahili',
+    'zh' => 'Mandarin Chinese',
+    'ja' => 'Japanese',
+    'hi' => 'Hindi',
+    'pt' => 'Portuguese',
+    'de' => 'German',
+    'it' => 'Italian',
+    'ar' => 'Arabic',
+    'ko' => 'Korean',
+    'ta' => 'Tamil',
+    'te' => 'Telugu',
+    'pa' => 'Punjabi',
+    'nl' => 'Dutch',
+    'ru' => 'Russian',
+    'tr' => 'Turkish',
+];
+
+$cmsg_render_subtitle_language_fields = function() use ($cmsg_source_languages, $cmsg_output_languages) {
+    ?>
+    <label>
+        <span>Spoken Language in Video</span>
+        <select name="source_language" class="cmmt-source-language">
+            <?php foreach ($cmsg_source_languages as $code => $label) : ?>
+                <option value="<?php echo esc_attr($code); ?>"><?php echo esc_html($label); ?></option>
+            <?php endforeach; ?>
+        </select>
+        <small class="cmmt-language-note">
+            Choose the language spoken in the video, then choose the language you want the subtitle file delivered in.
+            If a spoken language is not directly supported by the transcription engine, the system will automatically use language detection.
+        </small>
+    </label>
+
+    <label>
+        <span>Output Subtitle Language</span>
+        <select name="output_language" class="cmmt-output-language">
+            <?php foreach ($cmsg_output_languages as $code => $label) : ?>
+                <option value="<?php echo esc_attr($code); ?>"><?php echo esc_html($label); ?></option>
+            <?php endforeach; ?>
+        </select>
+        <small class="cmmt-language-note">
+            Choose the language spoken in the video, then choose the language you want the subtitle file delivered in.
+        </small>
+    </label>
+
+    <div class="cmmt-language-guidance">
+        <p>For Yoruba, Igbo, and Hausa, use Medium model for better accuracy. Results may require human review.</p>
+        <p>Igbo output subtitles are supported. Igbo spoken-language transcription may use auto-detect because faster-whisper does not currently support 'ig' as a source language.</p>
+    </div>
+    <?php
+};
+?>
 
 <section class="cmsg-shell cmsg-shell--premium" style="--cmsg-accent: <?php echo esc_attr($settings['accent_color']); ?>;">
 
@@ -70,61 +155,9 @@
                                 </select>
                             </label>
 
-                            <label><span>Language</span>
-                                <select name="language_code">
-                                    <option value="auto">Auto-detect</option>
-                                    <option value="en">English</option>
-                                    <option value="fr">French</option>
-                                    <option value="es">Spanish</option>
-                                    <option value="pt">Portuguese</option>
-                                    <option value="sw">Swahili</option>
-                                </select>
-                            </label>
-<label>
-    <span>Spoken language in video</span>
-    <select name="source_language">
-        <option value="auto">Auto Detect</option>
-        <option value="en">English</option>
-        <option value="ig">Igbo</option>
-        <option value="yo">Yoruba</option>
-        <option value="ha">Hausa</option>
-        <option value="sw">Swahili</option>
-        <option value="fr">French</option>
-        <option value="es">Spanish</option>
-        <option value="pt">Portuguese</option>
-        <option value="zh">Mandarin Chinese</option>
-    </select>
-</label>
-
-<label>
-    <span>Output subtitle language</span>
-    <select name="output_language">
-        <option value="same">Same as spoken language</option>
-        <option value="en">English</option>
-        <option value="ig">Igbo</option>
-        <option value="yo">Yoruba</option>
-        <option value="ha">Hausa</option>
-        <option value="sw">Swahili</option>
-        <option value="fr">French</option>
-        <option value="es">Spanish</option>
-        <option value="pt">Portuguese</option>
-        <option value="zh">Mandarin Chinese</option>
-    </select>
-</label>
-
-<label>
-    <span>Translation mode</span>
-    <select name="translation_mode">
-        <option value="none">No translation</option>
-        <option value="translate_to_english">Translate to English</option>
-        <option value="custom_output">Translate to selected output language</option>
-    </select>
-</label>
+                            <?php $cmsg_render_subtitle_language_fields(); ?>
 
                             <label><span>Speech model</span>
-<small class="cmmt-language-note">
-    For Yoruba, Igbo, and Hausa, use Medium model for better accuracy. Results may require human review. 
-</small>
                                 <select name="model_size">
                                     <option value="<?php echo esc_attr($settings['default_model']); ?>"><?php echo esc_html(ucfirst($settings['default_model'])); ?> default</option>
                                     <option value="tiny">Tiny</option>
@@ -196,63 +229,9 @@
                                 </select>
                             </label>
 
-                            <label><span>Language</span>
-                                <select name="language_code">
-                                    <option value="auto">Auto-detect</option>
-                                    <option value="en">English</option>
-                                    <option value="fr">French</option>
-                                    <option value="es">Spanish</option>
-                                    <option value="es">Spanish</option>
-                                    <option value="pt">Portuguese</option>
-                                    <option value="sw">Swahili</option>
-                                </select>
-                            </label>
-
-<label>
-    <span>Spoken language in video</span>
-    <select name="source_language">
-        <option value="auto">Auto Detect</option>
-        <option value="en">English</option>
-        <option value="ig">Igbo</option>
-        <option value="yo">Yoruba</option>
-        <option value="ha">Hausa</option>
-        <option value="sw">Swahili</option>
-        <option value="fr">French</option>
-        <option value="es">Spanish</option>
-        <option value="pt">Portuguese</option>
-        <option value="zh">Mandarin Chinese</option>
-    </select>
-</label>
-
-<label>
-    <span>Output subtitle language</span>
-    <select name="output_language">
-        <option value="same">Same as spoken language</option>
-        <option value="en">English</option>
-        <option value="ig">Igbo</option>
-        <option value="yo">Yoruba</option>
-        <option value="ha">Hausa</option>
-        <option value="sw">Swahili</option>
-        <option value="fr">French</option>
-        <option value="es">Spanish</option>
-        <option value="pt">Portuguese</option>
-        <option value="zh">Mandarin Chinese</option>
-    </select>
-</label>
-
-<label>
-    <span>Translation mode</span>
-    <select name="translation_mode">
-        <option value="none">No translation</option>
-        <option value="translate_to_english">Translate to English</option>
-        <option value="custom_output">Translate to selected output language</option>
-    </select>
-</label>
+                            <?php $cmsg_render_subtitle_language_fields(); ?>
 
                             <label><span>Speech model</span>
-<small class="cmmt-language-note">
-    For Yoruba, Igbo, and Hausa, use Medium model for better accuracy. Results may require human review. 
-</small>
                                 <select name="model_size">
                                     <option value="<?php echo esc_attr($settings['default_model']); ?>"><?php echo esc_html(ucfirst($settings['default_model'])); ?> default</option>
                                     <option value="tiny">Tiny</option>
@@ -355,46 +334,7 @@
                     </select>
                 </label>
 
-<label>
-    <span>Spoken language in video</span>
-    <select name="source_language">
-        <option value="auto">Auto Detect</option>
-        <option value="en">English</option>
-        <option value="ig">Igbo</option>
-        <option value="yo">Yoruba</option>
-        <option value="ha">Hausa</option>
-        <option value="sw">Swahili</option>
-        <option value="fr">French</option>
-        <option value="es">Spanish</option>
-        <option value="pt">Portuguese</option>
-        <option value="zh">Mandarin Chinese</option>
-    </select>
-</label>
-
-<label>
-    <span>Output subtitle language</span>
-    <select name="output_language">
-        <option value="same">Same as spoken language</option>
-        <option value="en">English</option>
-        <option value="ig">Igbo</option>
-        <option value="yo">Yoruba</option>
-        <option value="ha">Hausa</option>
-        <option value="sw">Swahili</option>
-        <option value="fr">French</option>
-        <option value="es">Spanish</option>
-        <option value="pt">Portuguese</option>
-        <option value="zh">Mandarin Chinese</option>
-    </select>
-</label>
-
-<label>
-    <span>Translation mode</span>
-    <select name="translation_mode">
-        <option value="none">No translation</option>
-        <option value="translate_to_english">Translate to English</option>
-        <option value="custom_output">Translate to selected output language</option>
-    </select>
-</label>
+<?php $cmsg_render_subtitle_language_fields(); ?>
 
 <label>
     <span>Speech model</span>
@@ -407,9 +347,6 @@
         <option value="small">Small</option>
         <option value="medium">Medium</option>
     </select>
-    <small class="cmmt-language-note">
-        For Yoruba, Igbo, and Hausa, use Medium model for better accuracy. Results may require human review.
-    </small>
 </label>
 
                 <label class="cmsg-file">

@@ -5,14 +5,21 @@ final class CMSG_Jobs {
     public static function create_job_from_authorized_draft($draft_id, $authorization_id) {
         global $wpdb; $draft = CMSG_Drafts::get($draft_id); if (!$draft) return new WP_Error('cmsg_draft_missing', 'Draft not found.');
         $now = current_time('mysql');
+        $source_language = !empty($draft->source_language) && $draft->source_language !== 'auto'
+            ? $draft->source_language
+            : (!empty($draft->language_code) ? $draft->language_code : 'auto');
+        $language_code = $source_language !== 'auto'
+            ? $source_language
+            : (!empty($draft->language_code) ? $draft->language_code : 'auto');
+
         $wpdb->insert(self::table(), [
             'created_at'=>$now,'updated_at'=>$now,'status'=>'queued','source_type'=>$draft->source_type, 'caption_mode'=>sanitize_text_field($draft->caption_mode ?? 'subtitle'), 'storage_provider'=>$draft->storage_provider,'object_key'=>$draft->object_key,
             'original_filename'=>$draft->original_filename ?: basename($draft->file_reference),
             'video_path'=>$draft->file_reference,'source_reference'=>$draft->source_reference ?: $draft->file_reference,
 
-            'language_code'=>$draft->language_code,
+            'language_code'=>$language_code,
 
-            'source_language'=>$draft->source_language ?? 'auto',
+            'source_language'=>$source_language,
             'output_language'=>$draft->output_language ?? 'same',
             'translation_mode'=>$draft->translation_mode ?? 'none',
 

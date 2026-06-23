@@ -120,6 +120,8 @@ final class CMSG_Plugin {
         add_action('wp_ajax_nopriv_cmsg_finalize_paid_draft', ['CMSG_Ajax', 'finalize_paid_draft']);
         add_action('wp_ajax_cmsg_job_status', ['CMSG_Ajax', 'job_status']);
         add_action('wp_ajax_nopriv_cmsg_job_status', ['CMSG_Ajax', 'job_status']);
+        add_action('wp_ajax_cmsg_retry_subtitle_job', ['CMSG_Ajax', 'retry_subtitle_job']);
+        add_action('wp_ajax_nopriv_cmsg_retry_subtitle_job', ['CMSG_Ajax', 'retry_subtitle_job']);
         add_action('wp_ajax_cmsg_list_server_files', ['CMSG_Ajax', 'list_server_files']);
         add_action('wp_ajax_nopriv_cmsg_list_server_files', ['CMSG_Ajax', 'list_server_files']);
         add_action('wp_ajax_cmsg_issue_download_grant', ['CMSG_Ajax', 'issue_download_grant']);

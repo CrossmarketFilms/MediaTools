@@ -16,10 +16,16 @@ private static function subtitle_progress_from_log($log_text, $status = '') {
         $message = trim($matches[2]);
     } elseif ($status === 'completed') {
         $progress = 100;
+    } elseif ($status === 'retry_available') {
+        $progress = 95;
     } elseif ($status === 'queued') {
         $progress = 10;
     } elseif ($status === 'processing') {
         $progress = 45;
+    }
+
+    if ($status === 'retry_available' && strpos($log_text, 'The selected spoken language is not directly supported.') !== 0) {
+        $message = CMSG_Processor::retry_available_message();
     }
 
     if ($message === '') {
@@ -34,17 +40,42 @@ private static function subtitle_progress_from_log($log_text, $status = '') {
     ];
 }
 
+private static function normalize_subtitle_language($language, $fallback = 'auto') {
+    $language = strtolower(trim((string)$language));
+    $language = preg_replace('/[^a-z_-]/', '', $language);
+
+    return $language !== '' ? $language : $fallback;
+}
+
+private static function infer_translation_mode($source_language, $output_language, $posted_mode = '') {
+    $posted_mode = sanitize_text_field($posted_mode);
+
+    if (in_array($posted_mode, ['translate_to_english', 'custom_output'], true)) {
+        return $posted_mode;
+    }
+
+    if ($output_language === '' || $output_language === 'same' || $output_language === $source_language) {
+        return 'none';
+    }
+
+    return 'custom_output';
+}
+
 public static function create_draft() {
     check_ajax_referer('cmsg_nonce', 'nonce');
 
     $source_type  = sanitize_text_field(wp_unslash($_POST['source_type'] ?? 'browser_upload'));
     $email        = sanitize_email(wp_unslash($_POST['request_email'] ?? ''));
     $runtime      = floatval(wp_unslash($_POST['runtime_minutes'] ?? 0));
-    $language     = sanitize_text_field(wp_unslash($_POST['language_code'] ?? 'auto'));
-
-    $source_language = sanitize_text_field(wp_unslash($_POST['source_language'] ?? 'auto'));
-    $output_language = sanitize_text_field(wp_unslash($_POST['output_language'] ?? 'same'));
-    $translation_mode = sanitize_text_field(wp_unslash($_POST['translation_mode'] ?? 'none'));
+    $legacy_language = self::normalize_subtitle_language(wp_unslash($_POST['language_code'] ?? 'auto'));
+    $source_language = self::normalize_subtitle_language(wp_unslash($_POST['source_language'] ?? $legacy_language));
+    $output_language = self::normalize_subtitle_language(wp_unslash($_POST['output_language'] ?? 'same'), 'same');
+    $translation_mode = self::infer_translation_mode(
+        $source_language,
+        $output_language,
+        wp_unslash($_POST['translation_mode'] ?? '')
+    );
+    $language = $source_language;
 
     $model        = sanitize_text_field(wp_unslash($_POST['model_size'] ?? CMSG_Plugin::settings()['default_model']));
     $caption_mode = sanitize_text_field(wp_unslash($_POST['caption_mode'] ?? 'subtitle'));
@@ -207,7 +238,45 @@ wp_send_json_success([
             'progress'=>$progress['progress'],
             'raw_message'=>$job->log_text,
             'caption_mode'=> isset($job->caption_mode) ? $job->caption_mode : 'subtitle',
-            'can_download'=>($job->payment_status==='paid' && $job->status==='completed')
+            'can_download'=>($job->payment_status==='paid' && $job->status==='completed'),
+            'can_retry'=>($job->payment_status==='paid' && $job->status==='retry_available')
+        ]);
+    }
+    public static function retry_subtitle_job() {
+        check_ajax_referer('cmsg_nonce', 'nonce');
+
+        $job = CMSG_Jobs::get_job((int)($_POST['job_id'] ?? 0));
+
+        if (!$job) {
+            wp_send_json_error(['message' => 'Job not found.'], 404);
+        }
+
+        if ($job->status !== 'retry_available') {
+            wp_send_json_error(['message' => 'This job is not currently available for retry.'], 409);
+        }
+
+        if ($job->payment_status !== 'paid' || empty($job->payment_authorization_id)) {
+            wp_send_json_error(['message' => 'Retry is only available for paid subtitle jobs.'], 403);
+        }
+
+        $auth = CMSG_Payments::get_by_id((int)$job->payment_authorization_id);
+
+        if (!$auth || !in_array($auth->status, ['used', 'active'], true)) {
+            wp_send_json_error(['message' => 'Payment authorization could not be confirmed for retry.'], 403);
+        }
+
+        CMSG_Jobs::update_job((int)$job->id, [
+            'status' => 'queued',
+            'srt_path' => '',
+            'vtt_path' => '',
+            'log_text' => '[10%] Retry requested. Reusing the existing paid authorization and queued media file.',
+        ]);
+
+        wp_schedule_single_event(time() + 5, 'cmsg_process_job', [(int)$job->id]);
+
+        wp_send_json_success([
+            'job_id' => (int)$job->id,
+            'message' => 'Retry started. Your existing payment and upload are being reused.',
         ]);
     }
     public static function detect_server_file_runtime() {

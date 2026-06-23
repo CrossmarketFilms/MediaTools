@@ -87,7 +87,71 @@ final class CMSG_Admin_Settings {
         return $clean;
     }
     public static function render_settings_page(){ if(!current_user_can('manage_options')) return; echo '<div class="wrap"><h1>Crossmarket Subtitle Generator Pro</h1><form method="post" action="options.php">'; settings_fields('cmsg_settings_group'); do_settings_sections('cmsg-settings'); submit_button('Save settings'); echo '</form></div>'; }
-    public static function render_jobs_page(){ if(!current_user_can('manage_options')) return; global $wpdb; $table=$wpdb->prefix.'cmsg_jobs'; $jobs=$wpdb->get_results("SELECT * FROM {$table} ORDER BY id DESC LIMIT 100"); echo '<div class="wrap"><h1>Subtitle Jobs</h1><table class="widefat striped"><thead><tr><th>ID</th><th>Status</th><th>Source</th><th>Video</th><th>Email</th><th>Language</th><th>Minutes</th><th>Price</th><th>Payment</th><th>Created</th><th>SRT</th></tr></thead><tbody>'; if($jobs) foreach($jobs as $job){ $download=''; if(!empty($job->srt_path) && $job->payment_status==='paid' && $job->status==='completed') $download='Protected'; echo '<tr><td>'.intval($job->id).'</td><td>'.esc_html($job->status).'</td><td>'.esc_html($job->source_type ?: 'browser_upload').'</td><td>'.esc_html($job->original_filename).'</td><td>'.esc_html($job->requester_email).'</td><td>'.esc_html($job->language_code).'</td><td>'.esc_html($job->minutes_estimate).'</td><td>'.esc_html(self::money($job->estimated_price)).'</td><td>'.esc_html($job->payment_status).'</td><td>'.esc_html($job->created_at).'</td><td>'.$download.'</td></tr>'; } else echo '<tr><td colspan="11">No jobs yet.</td></tr>'; echo '</tbody></table></div>'; }
+    private static function maybe_admin_reset_subtitle_job() {
+        if (!current_user_can('manage_options')) return;
+        if (empty($_GET['cmsg_admin_action']) || $_GET['cmsg_admin_action'] !== 'reset_subtitle_job') return;
+
+        $job_id = (int)($_GET['job_id'] ?? 0);
+
+        if (!$job_id || !check_admin_referer('cmsg_admin_reset_subtitle_job_' . $job_id)) {
+            return;
+        }
+
+        $job = CMSG_Jobs::get_job($job_id);
+
+        if (!$job || $job->payment_status !== 'paid' || empty($job->payment_authorization_id)) {
+            add_settings_error('cmsg_jobs', 'cmsg_reset_unavailable', 'This subtitle job cannot be reset because paid authorization was not found.', 'error');
+            return;
+        }
+
+        CMSG_Jobs::update_job($job_id, [
+            'status' => 'queued',
+            'srt_path' => '',
+            'vtt_path' => '',
+            'log_text' => '[10%] Administrator reset requested. Reusing the existing paid authorization with no repayment required.',
+        ]);
+
+        wp_schedule_single_event(time() + 5, 'cmsg_process_job', [$job_id]);
+        add_settings_error('cmsg_jobs', 'cmsg_reset_started', 'Subtitle job reset and queued without requiring repayment.', 'updated');
+    }
+
+    public static function render_jobs_page(){
+        if(!current_user_can('manage_options')) return;
+
+        self::maybe_admin_reset_subtitle_job();
+
+        global $wpdb;
+        $table=$wpdb->prefix.'cmsg_jobs';
+        $jobs=$wpdb->get_results("SELECT * FROM {$table} ORDER BY id DESC LIMIT 100");
+
+        echo '<div class="wrap"><h1>Subtitle Jobs</h1>';
+        settings_errors('cmsg_jobs');
+        echo '<table class="widefat striped"><thead><tr><th>ID</th><th>Status</th><th>Source</th><th>Video</th><th>Email</th><th>Language</th><th>Minutes</th><th>Price</th><th>Payment</th><th>Created</th><th>SRT</th><th>Actions</th></tr></thead><tbody>';
+
+        if($jobs) foreach($jobs as $job){
+            $download='';
+            if(!empty($job->srt_path) && $job->payment_status==='paid' && $job->status==='completed') $download='Protected';
+
+            $actions = '';
+            if ($job->payment_status === 'paid' && !empty($job->payment_authorization_id) && in_array($job->status, ['retry_available', 'failed'], true)) {
+                $reset_url = wp_nonce_url(
+                    add_query_arg([
+                        'page' => 'cmsg-jobs',
+                        'cmsg_admin_action' => 'reset_subtitle_job',
+                        'job_id' => (int)$job->id,
+                    ], admin_url('admin.php')),
+                    'cmsg_admin_reset_subtitle_job_' . (int)$job->id
+                );
+                $actions = '<a class="button button-small" href="' . esc_url($reset_url) . '">Reset / Retry without repayment</a>';
+            }
+
+            echo '<tr><td>'.intval($job->id).'</td><td>'.esc_html($job->status).'</td><td>'.esc_html($job->source_type ?: 'browser_upload').'</td><td>'.esc_html($job->original_filename).'</td><td>'.esc_html($job->requester_email).'</td><td>'.esc_html($job->language_code).'</td><td>'.esc_html($job->minutes_estimate).'</td><td>'.esc_html(self::money($job->estimated_price)).'</td><td>'.esc_html($job->payment_status).'</td><td>'.esc_html($job->created_at).'</td><td>'.$download.'</td><td>'.$actions.'</td></tr>';
+        } else {
+            echo '<tr><td colspan="12">No jobs yet.</td></tr>';
+        }
+
+        echo '</tbody></table></div>';
+    }
     public static function render_service_requests_page(){ if(!current_user_can('manage_options')) return; global $wpdb; $table=$wpdb->prefix.'cmsg_service_requests'; $rows=$wpdb->get_results("SELECT * FROM {$table} ORDER BY id DESC LIMIT 100"); echo '<div class="wrap"><h1>Service Requests</h1><table class="widefat striped"><thead><tr><th>ID</th><th>Status</th><th>Service</th><th>Name</th><th>Email</th><th>Budget</th><th>Price</th><th>Payment</th><th>Created</th></tr></thead><tbody>'; if($rows) foreach($rows as $r){ echo '<tr><td>'.intval($r->id).'</td><td>'.esc_html($r->status).'</td><td>'.esc_html($r->service_type).'</td><td>'.esc_html($r->requester_name).'</td><td>'.esc_html($r->requester_email).'</td><td>'.esc_html($r->budget_range).'</td><td>'.esc_html(self::money($r->estimated_price)).'</td><td>'.esc_html($r->payment_status).'</td><td>'.esc_html($r->created_at).'</td></tr>'; } else echo '<tr><td colspan="9">No service requests yet.</td></tr>'; echo '</tbody></table></div>'; }
     public static function money($amount){ $s=CMSG_Plugin::settings(); return $s['currency_symbol'].number_format((float)$amount,2); }
 }

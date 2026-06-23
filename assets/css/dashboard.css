@@ -282,6 +282,27 @@
     line-height: 1.4 !important;
     font-weight: 500 !important;
 }
+
+.cmmt-language-guidance {
+    grid-column: 1 / -1 !important;
+    border-left: 4px solid #f59e0b !important;
+    background: rgba(245, 158, 11, 0.08) !important;
+    color: #374151 !important;
+    padding: 12px 14px !important;
+    border-radius: 8px !important;
+}
+
+.cmmt-language-guidance p {
+    margin: 0 0 6px 0 !important;
+    color: #374151 !important;
+    font-size: 13px !important;
+    line-height: 1.45 !important;
+    font-weight: 600 !important;
+}
+
+.cmmt-language-guidance p:last-child {
+    margin-bottom: 0 !important;
+}
 /* ===== v3.0.1 Dashboard module header visibility fix ===== */
 
 .cmmt-dashboard h1,

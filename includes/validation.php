@@ -80,6 +80,8 @@ final class CMSG_Validation {
             (string)($payload['amount'] ?? ''),
             (string)($payload['currency'] ?? ''),
             sanitize_text_field($payload['language_code'] ?? ''),
+            sanitize_text_field($payload['source_language'] ?? ''),
+            sanitize_text_field($payload['output_language'] ?? ''),
             sanitize_text_field($payload['model_size'] ?? ''),
         ];
         return hash('sha256', implode('|', $parts));
