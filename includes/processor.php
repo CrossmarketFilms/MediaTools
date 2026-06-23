@@ -23,6 +23,10 @@ final class CMSG_Processor {
         return "The selected spoken language is not directly supported.\nYour payment has been preserved.\nPlease retry after updating language settings.";
     }
 
+    public static function speech_timeout_retry_message() {
+        return 'Speech recognition did not complete in the expected time. Your payment is preserved and this job can be retried without repayment.';
+    }
+
     private static function mark_retry_available($job_id, $reason, $percent = 95) {
         $reason = trim((string)$reason);
 
@@ -51,6 +55,177 @@ final class CMSG_Processor {
             'status' => 'retry_available',
             'log_text' => self::unsupported_language_retry_message(),
         ]);
+    }
+
+    private static function mark_speech_timeout_retry_available($job_id, $reason) {
+        CMSG_Jobs::update_job($job_id, [
+            'status' => 'retry_available',
+            'log_text' => self::progress_message(45, self::speech_timeout_retry_message()) . "\nOriginal failure reason:\n" . trim((string)$reason),
+        ]);
+    }
+
+    private static function speech_recognition_timeout_seconds($job) {
+        $minutes = !empty($job->minutes_estimate) ? (float)$job->minutes_estimate : 0.0;
+
+        if ($minutes <= 0) {
+            return 7200;
+        }
+
+        return max(1800, min(21600, (int)ceil(($minutes * 180) + 900)));
+    }
+
+    private static function tail_log_lines($text, $limit = 180) {
+        $lines = preg_split('/\R/', (string)$text);
+
+        if (!is_array($lines)) {
+            return (string)$text;
+        }
+
+        return implode("\n", array_slice($lines, -1 * absint($limit)));
+    }
+
+    private static function redact_command_for_log($command, $paths = []) {
+        $redacted = (string)$command;
+        $uploads = wp_upload_dir();
+
+        if (!empty($uploads['basedir'])) {
+            $redacted = str_replace($uploads['basedir'], '[uploads]', $redacted);
+        }
+
+        $redacted = str_replace(CMSG_DIR, '[plugin]/', $redacted);
+
+        foreach ($paths as $label => $path) {
+            if (!empty($path) && is_string($path)) {
+                $redacted = str_replace($path, '[' . sanitize_key((string)$label) . ':' . basename($path) . ']', $redacted);
+            }
+        }
+
+        return $redacted;
+    }
+
+    private static function log_speech_recognition_start($job_id, $details) {
+        $encoded = function_exists('wp_json_encode') ? wp_json_encode($details) : json_encode($details);
+        error_log('CMSG SPEECH RECOGNITION START job_id=' . (int)$job_id . ' ' . $encoded);
+    }
+
+    private static function run_speech_recognition_command($job_id, $command, $timeout_seconds) {
+        if (!function_exists('proc_open')) {
+            return [
+                'code' => 127,
+                'output' => ['proc_open is unavailable, so speech recognition could not be monitored safely.'],
+                'timed_out' => false,
+                'elapsed' => 0,
+            ];
+        }
+
+        $descriptors = [
+            0 => ['pipe', 'r'],
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ];
+
+        $process = proc_open($command, $descriptors, $pipes);
+
+        if (!is_resource($process)) {
+            return [
+                'code' => 127,
+                'output' => ['Unable to start speech recognition subprocess.'],
+                'timed_out' => false,
+                'elapsed' => 0,
+            ];
+        }
+
+        fclose($pipes[0]);
+        stream_set_blocking($pipes[1], false);
+        stream_set_blocking($pipes[2], false);
+
+        $output = '';
+        $start = time();
+        $last_heartbeat = $start;
+        $exit_code = null;
+
+        while (true) {
+            foreach ([1, 2] as $pipe_index) {
+                $chunk = stream_get_contents($pipes[$pipe_index]);
+
+                if ($chunk !== false && $chunk !== '') {
+                    $output .= $chunk;
+                }
+            }
+
+            $status = proc_get_status($process);
+
+            if (!$status['running']) {
+                $exit_code = isset($status['exitcode']) ? (int)$status['exitcode'] : null;
+                break;
+            }
+
+            $elapsed = time() - $start;
+
+            if ($elapsed >= $timeout_seconds) {
+                proc_terminate($process, 15);
+                sleep(2);
+
+                $status = proc_get_status($process);
+
+                if (!empty($status['running'])) {
+                    proc_terminate($process, 9);
+                }
+
+                foreach ([1, 2] as $pipe_index) {
+                    $chunk = stream_get_contents($pipes[$pipe_index]);
+
+                    if ($chunk !== false && $chunk !== '') {
+                        $output .= $chunk;
+                    }
+
+                    fclose($pipes[$pipe_index]);
+                }
+
+                proc_close($process);
+
+                return [
+                    'code' => 124,
+                    'output' => preg_split('/\R/', trim($output)),
+                    'timed_out' => true,
+                    'elapsed' => $elapsed,
+                ];
+            }
+
+            if ((time() - $last_heartbeat) >= 180) {
+                self::update_progress(
+                    $job_id,
+                    45,
+                    'Running speech recognition... Last heartbeat ' . gmdate('Y-m-d H:i:s') . ' UTC. Elapsed ' . $elapsed . 's of timeout ' . $timeout_seconds . 's.'
+                );
+                $last_heartbeat = time();
+            }
+
+            sleep(1);
+        }
+
+        foreach ([1, 2] as $pipe_index) {
+            $chunk = stream_get_contents($pipes[$pipe_index]);
+
+            if ($chunk !== false && $chunk !== '') {
+                $output .= $chunk;
+            }
+
+            fclose($pipes[$pipe_index]);
+        }
+
+        $close_code = proc_close($process);
+
+        if ($exit_code === null || $exit_code < 0) {
+            $exit_code = (int)$close_code;
+        }
+
+        return [
+            'code' => $exit_code,
+            'output' => preg_split('/\R/', trim($output)),
+            'timed_out' => false,
+            'elapsed' => time() - $start,
+        ];
     }
 
     private static function is_closed_caption_mode($job) {
@@ -425,6 +600,7 @@ $message .= "Crossmarket Films";
         $script = escapeshellarg(CMSG_DIR . 'bin/generate_subtitles.py');
         $video = escapeshellarg($resolved_video_path);
         $source_language = self::normalize_language_code(!empty($job->source_language) ? $job->source_language : (!empty($job->language_code) ? $job->language_code : 'auto'));
+        $output_language = self::normalize_language_code(!empty($job->output_language) ? (string) $job->output_language : 'same', 'same');
         $language_resolution = self::resolve_faster_whisper_language($source_language);
         $language_arg = '';
 
@@ -432,11 +608,30 @@ $message .= "Crossmarket Films";
             $language_arg = ' --language ' . escapeshellarg($language_resolution['transcription']);
         }
 
-        $model = escapeshellarg(!empty($job->model_size) ? $job->model_size : $s['default_model']);
+        $model_size = !empty($job->model_size) ? $job->model_size : $s['default_model'];
+        $model = escapeshellarg($model_size);
         $ffmpeg = escapeshellarg($s['ffmpeg_binary']);
         $mode = escapeshellarg($s['whisper_mode']);
 
-        $command = "{$python} {$script} --video {$video}{$language_arg} --model {$model} --ffmpeg {$ffmpeg} --mode {$mode} 2>&1";
+        $command = "{$python} {$script} --video {$video}{$language_arg} --model {$model} --ffmpeg {$ffmpeg} --mode {$mode}";
+        $timeout_seconds = self::speech_recognition_timeout_seconds($job);
+        $redacted_command = self::redact_command_for_log($command, [
+            'video' => $resolved_video_path,
+        ]);
+
+        self::log_speech_recognition_start($job_id, [
+            'job_id' => (int)$job_id,
+            'source_language' => $source_language,
+            'output_language' => $output_language,
+            'resolved_faster_whisper_language' => $language_resolution['transcription'],
+            'passes_language_argument' => $language_arg !== '',
+            'language_argument' => $language_arg !== '' ? trim($language_arg) : 'omitted; auto-detect enabled',
+            'model_size' => $model_size,
+            'resolved_local_video_path' => $resolved_video_path,
+            'resolved_audio_path' => 'created by bin/generate_subtitles.py inside a temporary cmsg_* directory',
+            'timeout_seconds' => $timeout_seconds,
+            'command' => $redacted_command,
+        ]);
 
         self::update_progress($job_id, 30, 'Extracting audio and preparing speech recognition.');
 
@@ -446,11 +641,19 @@ $message .= "Crossmarket Films";
 
         self::update_progress($job_id, 45, 'Running speech recognition. Longer videos may remain on this step while transcription completes.');
 
-        $output = [];
-        $return_var = 0;
-        exec($command, $output, $return_var);
+        $speech_result = self::run_speech_recognition_command($job_id, $command, $timeout_seconds);
+        $output = is_array($speech_result['output']) ? $speech_result['output'] : [];
+        $return_var = (int)$speech_result['code'];
 
         $log = implode("\n", $output);
+
+        if (!empty($speech_result['timed_out'])) {
+            self::mark_speech_timeout_retry_available(
+                $job_id,
+                "Speech recognition timed out after {$speech_result['elapsed']} seconds.\nCommand:\n{$redacted_command}\nLast subprocess output:\n" . self::tail_log_lines($log, 180)
+            );
+            return;
+        }
 
         if ($return_var !== 0) {
             if (self::is_unsupported_language_failure($log)) {
@@ -458,7 +661,11 @@ $message .= "Crossmarket Films";
                 return;
             }
 
-            self::mark_retry_available($job_id, "Subtitle generation failed.\n" . $log, 45);
+            self::mark_retry_available(
+                $job_id,
+                "Subtitle generation failed with exit code {$return_var}.\nCommand:\n{$redacted_command}\nLast subprocess output:\n" . self::tail_log_lines($log, 180),
+                45
+            );
             return;
         }
 
@@ -479,7 +686,6 @@ $message .= "Crossmarket Films";
 
         $caption_mode = isset($job->caption_mode) ? (string) $job->caption_mode : 'subtitle';
 
-$output_language = self::normalize_language_code(!empty($job->output_language) ? (string) $job->output_language : 'same', 'same');
 $translation_mode = !empty($job->translation_mode) ? (string) $job->translation_mode : 'none';
 
 $should_translate = (

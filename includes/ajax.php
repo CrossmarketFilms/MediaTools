@@ -24,7 +24,11 @@ private static function subtitle_progress_from_log($log_text, $status = '') {
         $progress = 45;
     }
 
-    if ($status === 'retry_available' && strpos($log_text, 'The selected spoken language is not directly supported.') !== 0) {
+    if (
+        $status === 'retry_available'
+        && strpos($log_text, 'The selected spoken language is not directly supported.') !== 0
+        && strpos($log_text, CMSG_Processor::speech_timeout_retry_message()) === false
+    ) {
         $message = CMSG_Processor::retry_available_message();
     }
 
