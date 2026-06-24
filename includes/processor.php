@@ -108,6 +108,64 @@ final class CMSG_Processor {
         error_log('CMSG SPEECH RECOGNITION START job_id=' . (int)$job_id . ' ' . $encoded);
     }
 
+    private static function subtitle_chunk_seconds($settings) {
+        $configured = !empty($settings['subtitle_chunk_seconds'])
+            ? absint($settings['subtitle_chunk_seconds'])
+            : 300;
+
+        $configured = (int)apply_filters('cmsg_subtitle_chunk_seconds', $configured);
+
+        return max(60, min(1800, $configured));
+    }
+
+    private static function handle_speech_output_chunk($job_id, $chunk, &$line_buffer) {
+        $line_buffer .= (string)$chunk;
+        $lines = preg_split('/\R/', $line_buffer);
+
+        if (!is_array($lines)) {
+            return;
+        }
+
+        $line_buffer = array_pop($lines);
+
+        foreach ($lines as $line) {
+            self::handle_speech_output_line($job_id, $line);
+        }
+    }
+
+    private static function flush_speech_output_buffer($job_id, &$line_buffer) {
+        if (trim((string)$line_buffer) !== '') {
+            self::handle_speech_output_line($job_id, $line_buffer);
+        }
+
+        $line_buffer = '';
+    }
+
+    private static function handle_speech_output_line($job_id, $line) {
+        $line = trim((string)$line);
+
+        if ($line === '') {
+            return;
+        }
+
+        if (strpos($line, 'CMSG_PROGRESS=') === 0) {
+            $payload = substr($line, strlen('CMSG_PROGRESS='));
+            $parts = explode('|', $payload, 2);
+            $percent = isset($parts[0]) ? absint($parts[0]) : 45;
+            $message = isset($parts[1]) ? trim($parts[1]) : 'Processing subtitle job.';
+
+            if ($message !== '') {
+                self::update_progress($job_id, max(1, min(99, $percent)), $message);
+            }
+
+            return;
+        }
+
+        if (strpos($line, 'CMSG_DIAG=') === 0) {
+            error_log('CMSG SPEECH DIAG job_id=' . (int)$job_id . ' ' . substr($line, strlen('CMSG_DIAG=')));
+        }
+    }
+
     private static function run_speech_recognition_command($job_id, $command, $timeout_seconds) {
         if (!function_exists('proc_open')) {
             return [
@@ -140,6 +198,7 @@ final class CMSG_Processor {
         stream_set_blocking($pipes[2], false);
 
         $output = '';
+        $line_buffer = '';
         $start = time();
         $last_heartbeat = $start;
         $exit_code = null;
@@ -150,6 +209,7 @@ final class CMSG_Processor {
 
                 if ($chunk !== false && $chunk !== '') {
                     $output .= $chunk;
+                    self::handle_speech_output_chunk($job_id, $chunk, $line_buffer);
                 }
             }
 
@@ -177,11 +237,13 @@ final class CMSG_Processor {
 
                     if ($chunk !== false && $chunk !== '') {
                         $output .= $chunk;
+                        self::handle_speech_output_chunk($job_id, $chunk, $line_buffer);
                     }
 
                     fclose($pipes[$pipe_index]);
                 }
 
+                self::flush_speech_output_buffer($job_id, $line_buffer);
                 proc_close($process);
 
                 return [
@@ -209,11 +271,13 @@ final class CMSG_Processor {
 
             if ($chunk !== false && $chunk !== '') {
                 $output .= $chunk;
+                self::handle_speech_output_chunk($job_id, $chunk, $line_buffer);
             }
 
             fclose($pipes[$pipe_index]);
         }
 
+        self::flush_speech_output_buffer($job_id, $line_buffer);
         $close_code = proc_close($process);
 
         if ($exit_code === null || $exit_code < 0) {
@@ -612,8 +676,15 @@ $message .= "Crossmarket Films";
         $model = escapeshellarg($model_size);
         $ffmpeg = escapeshellarg($s['ffmpeg_binary']);
         $mode = escapeshellarg($s['whisper_mode']);
+        $chunk_seconds = self::subtitle_chunk_seconds($s);
+        $chunk_arg = ' --chunk-seconds ' . escapeshellarg((string)$chunk_seconds);
+        $auto_detect_arg = '';
 
-        $command = "{$python} {$script} --video {$video}{$language_arg} --model {$model} --ffmpeg {$ffmpeg} --mode {$mode}";
+        if (!$language_resolution['is_supported'] && $language_resolution['transcription'] === 'auto') {
+            $auto_detect_arg = ' --auto-detect-reason ' . escapeshellarg('unsupported-source-language');
+        }
+
+        $command = "{$python} {$script} --video {$video}{$language_arg} --model {$model} --ffmpeg {$ffmpeg} --mode {$mode}{$chunk_arg}{$auto_detect_arg}";
         $timeout_seconds = self::speech_recognition_timeout_seconds($job);
         $redacted_command = self::redact_command_for_log($command, [
             'video' => $resolved_video_path,
@@ -630,16 +701,17 @@ $message .= "Crossmarket Films";
             'resolved_local_video_path' => $resolved_video_path,
             'resolved_audio_path' => 'created by bin/generate_subtitles.py inside a temporary cmsg_* directory',
             'timeout_seconds' => $timeout_seconds,
+            'chunk_seconds' => $chunk_seconds,
             'command' => $redacted_command,
         ]);
 
         self::update_progress($job_id, 30, 'Extracting audio and preparing speech recognition.');
 
         if (!$language_resolution['is_supported'] && $language_resolution['message'] !== '') {
-            self::update_progress($job_id, 30, $language_resolution['message']);
+            self::update_progress($job_id, 30, 'Unsupported source language selected. Using Faster-Whisper auto-detection.');
         }
 
-        self::update_progress($job_id, 45, 'Running speech recognition. Longer videos may remain on this step while transcription completes.');
+        self::update_progress($job_id, 45, 'Processing long-form audio. This may take several minutes depending on length and model size.');
 
         $speech_result = self::run_speech_recognition_command($job_id, $command, $timeout_seconds);
         $output = is_array($speech_result['output']) ? $speech_result['output'] : [];
@@ -682,7 +754,7 @@ $message .= "Crossmarket Films";
             return;
         }
 
-        self::update_progress($job_id, 65, 'Building transcript segments from speech recognition output.');
+        self::update_progress($job_id, 96, 'Speech recognition complete. Building transcript segments from chunk output.');
 
         $caption_mode = isset($job->caption_mode) ? (string) $job->caption_mode : 'subtitle';
 
@@ -698,7 +770,7 @@ $should_translate = (
 $translation_note = '';
 
 if ($source_language === 'yo' && file_exists($srt)) {
-    self::update_progress($job_id, 75, 'Applying localization cleanup before final subtitle formatting.');
+    self::update_progress($job_id, 95, 'Applying localization cleanup before final subtitle formatting.');
 
     $cleaned_yoruba_srt = preg_replace('/\.srt$/i', '-yo-cleaned.srt', $srt);
 
@@ -722,7 +794,7 @@ if ($source_language === 'yo' && file_exists($srt)) {
 }
 
 if ($should_translate && file_exists($srt)) {
-    self::update_progress($job_id, 75, 'Applying translation/localization to subtitle segments.');
+    self::update_progress($job_id, 95, 'Applying translation/localization to subtitle segments.');
 
     $translated_srt = preg_replace('/\.srt$/i', '-' . sanitize_file_name($output_language) . '.srt', $srt);
 
@@ -768,16 +840,16 @@ if ($output_language === 'yo' && file_exists($srt)) {
         return;
     }
 }
-        self::update_progress($job_id, 85, 'Formatting subtitle timestamps.');
-        self::update_progress($job_id, 90, 'Creating SRT file.');
+        self::update_progress($job_id, 96, 'Formatting subtitle timestamps.');
+        self::update_progress($job_id, 96, 'Generating SRT...');
 
         @chmod($srt, 0664);
 
-        self::update_progress($job_id, 93, 'Creating VTT file.');
+        self::update_progress($job_id, 97, 'Generating VTT...');
         $vtt = self::create_vtt_from_srt($srt);
 
 if ($caption_mode === 'closed_caption' && !empty($vtt)) {
-    self::update_progress($job_id, 95, 'Adding closed-caption cues to VTT file.');
+    self::update_progress($job_id, 98, 'Adding closed-caption cues to VTT file.');
 
     $cue_result = self::add_basic_detected_cues_to_vtt($vtt, $resolved_video_path);
 
@@ -786,7 +858,7 @@ if ($caption_mode === 'closed_caption' && !empty($vtt)) {
     }
 }
 
-        self::update_progress($job_id, 97, 'Saving final subtitle files.', [
+        self::update_progress($job_id, 98, 'Finalizing downloads.', [
             'srt_path' => $srt,
             'vtt_path' => !empty($vtt) ? $vtt : '',
         ]);
