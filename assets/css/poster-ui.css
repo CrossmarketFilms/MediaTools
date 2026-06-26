@@ -263,6 +263,20 @@ label.cmsg-file .cmmt-upload-hint {
 
 #cmmt-add-cast-member {
     margin-top:4px;
+    background:#facc15 !important;
+    border:1px solid #eab308 !important;
+    color:#111827 !important;
+    -webkit-text-fill-color:#111827 !important;
+    font-weight:900 !important;
+    box-shadow:0 8px 18px rgba(250, 204, 21, 0.22);
+}
+
+#cmmt-add-cast-member:hover,
+#cmmt-add-cast-member:focus {
+    background:#fde047 !important;
+    border-color:#facc15 !important;
+    color:#111827 !important;
+    -webkit-text-fill-color:#111827 !important;
 }
 
 /* Poster Studio mobile dark-card label visibility */
