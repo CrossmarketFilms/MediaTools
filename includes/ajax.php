@@ -528,31 +528,84 @@ CMSG_Drafts::update_draft($draft->id, [
         wp_send_json_success($result);
     }
 
+    private static function poster_allowed_image_extensions() {
+        return ['jpg', 'jpeg', 'png', 'webp'];
+    }
+
+    private static function poster_upload_file($file, $label) {
+        if (empty($file['name'])) {
+            return '';
+        }
+
+        if (!empty($file['error']) && (int)$file['error'] !== UPLOAD_ERR_OK) {
+            return new WP_Error('cmsg_poster_upload_error', $label . ' could not be uploaded.');
+        }
+
+        $ext = strtolower(pathinfo((string)$file['name'], PATHINFO_EXTENSION));
+        if (!in_array($ext, self::poster_allowed_image_extensions(), true)) {
+            return new WP_Error('cmsg_poster_invalid_image_type', $label . ' must be JPG, JPEG, PNG, or WEBP. HEIC, HEIF, SVG, PDF, and other files are not supported.');
+        }
+
+        $checked = wp_check_filetype_and_ext($file['tmp_name'], $file['name']);
+        $mime = $checked['type'] ?? '';
+        $allowed_mimes = ['image/jpeg', 'image/png', 'image/webp'];
+
+        if (!in_array($mime, $allowed_mimes, true)) {
+            return new WP_Error('cmsg_poster_invalid_image_mime', $label . ' must be a valid JPG, JPEG, PNG, or WEBP image.');
+        }
+
+        $uploaded = wp_handle_upload($file, ['test_form' => false]);
+        if (!empty($uploaded['error']) || empty($uploaded['file'])) {
+            return new WP_Error('cmsg_poster_upload_failed', $label . ' upload failed: ' . ($uploaded['error'] ?? 'Unknown upload error.'));
+        }
+
+        return $uploaded['file'];
+    }
+
     private static function save_poster_uploads() {
         require_once ABSPATH . 'wp-admin/includes/file.php';
-$saved = [
-    'style_reference' => '',
-    'poster_assets' => [],
-    'cast_actor_1' => '',
-    'cast_actor_2' => '',
-    'cast_actor_3' => '',
-];
 
+        $saved = [
+            'style_reference' => '',
+            'poster_assets' => [],
+            'cast_actor_1' => '',
+            'cast_actor_2' => '',
+            'cast_actor_3' => '',
+            'cast_members' => [],
+        ];
 
         if (!empty($_FILES['style_reference']['name'])) {
-            $uploaded = wp_handle_upload($_FILES['style_reference'], ['test_form' => false]);
-            if (empty($uploaded['error']) && !empty($uploaded['file'])) {
-                $saved['style_reference'] = $uploaded['file'];
+            $uploaded = self::poster_upload_file($_FILES['style_reference'], 'Style reference');
+            if (is_wp_error($uploaded)) return $uploaded;
+            $saved['style_reference'] = $uploaded;
+        }
+
+        foreach (['cast_actor_1', 'cast_actor_2', 'cast_actor_3'] as $cast_key) {
+            if (!empty($_FILES[$cast_key]['name'])) {
+                $uploaded = self::poster_upload_file($_FILES[$cast_key], 'Actor reference');
+                if (is_wp_error($uploaded)) return $uploaded;
+                $saved[$cast_key] = $uploaded;
             }
         }
-foreach (['cast_actor_1', 'cast_actor_2', 'cast_actor_3'] as $cast_key) {
-    if (!empty($_FILES[$cast_key]['name'])) {
-        $uploaded = wp_handle_upload($_FILES[$cast_key], ['test_form' => false]);
-        if (empty($uploaded['error']) && !empty($uploaded['file'])) {
-            $saved[$cast_key] = $uploaded['file'];
+
+        if (!empty($_FILES['cast_members']['name']) && is_array($_FILES['cast_members']['name'])) {
+            foreach ($_FILES['cast_members']['name'] as $i => $fields) {
+                $name = is_array($fields) ? ($fields['image'] ?? '') : '';
+                if (empty($name)) continue;
+
+                $file = [
+                    'name'     => $_FILES['cast_members']['name'][$i]['image'] ?? '',
+                    'type'     => $_FILES['cast_members']['type'][$i]['image'] ?? '',
+                    'tmp_name' => $_FILES['cast_members']['tmp_name'][$i]['image'] ?? '',
+                    'error'    => $_FILES['cast_members']['error'][$i]['image'] ?? UPLOAD_ERR_NO_FILE,
+                    'size'     => $_FILES['cast_members']['size'][$i]['image'] ?? 0,
+                ];
+
+                $uploaded = self::poster_upload_file($file, 'Cast Member ' . ((int)$i + 1) . ' actor reference');
+                if (is_wp_error($uploaded)) return $uploaded;
+                $saved['cast_members'][(int)$i] = $uploaded;
+            }
         }
-    }
-}
 
         if (!empty($_FILES['poster_assets']['name']) && is_array($_FILES['poster_assets']['name'])) {
             foreach ($_FILES['poster_assets']['name'] as $i => $name) {
@@ -564,13 +617,71 @@ foreach (['cast_actor_1', 'cast_actor_2', 'cast_actor_3'] as $cast_key) {
                     'error'    => $_FILES['poster_assets']['error'][$i],
                     'size'     => $_FILES['poster_assets']['size'][$i],
                 ];
-                $uploaded = wp_handle_upload($file, ['test_form' => false]);
-                if (empty($uploaded['error']) && !empty($uploaded['file'])) {
-                    $saved['poster_assets'][] = $uploaded['file'];
-                }
+                $uploaded = self::poster_upload_file($file, 'Poster asset');
+                if (is_wp_error($uploaded)) return $uploaded;
+                $saved['poster_assets'][] = $uploaded;
             }
         }
         return $saved;
+    }
+
+    private static function posted_cast_members($uploads = [], $meta = []) {
+        $raw = wp_unslash($_POST['cast_members'] ?? '');
+        $posted = [];
+
+        if (is_string($raw) && $raw !== '') {
+            $decoded = json_decode($raw, true);
+            if (is_array($decoded)) {
+                $posted = $decoded;
+            }
+        }
+
+        if (empty($posted) && !empty($meta['cast_members']) && is_array($meta['cast_members'])) {
+            $posted = $meta['cast_members'];
+        }
+
+        $members = [];
+        $max = 10;
+
+        for ($i = 0; $i < $max; $i++) {
+            $row = isset($posted[$i]) && is_array($posted[$i]) ? $posted[$i] : [];
+            $role = sanitize_key($row['role'] ?? ($i < 2 ? 'lead' : 'supporting'));
+            $role = $role === 'lead' ? 'lead' : 'supporting';
+            $meta_member = isset($meta['cast_members'][$i]) && is_array($meta['cast_members'][$i]) ? $meta['cast_members'][$i] : [];
+            $image = $uploads['cast_members'][$i] ?? ($row['image'] ?? ($meta_member['image'] ?? ($meta['cast_actor_' . ($i + 1)] ?? '')));
+            $image = is_string($image) ? sanitize_text_field($image) : '';
+
+            $member = [
+                'name' => sanitize_text_field($row['name'] ?? ''),
+                'role' => $role,
+                'instruction' => sanitize_text_field($row['instruction'] ?? ''),
+                'image' => $image,
+            ];
+
+            if ($member['name'] !== '' || $member['instruction'] !== '' || $member['image'] !== '') {
+                $members[] = $member;
+            }
+        }
+
+        if (!empty($members)) {
+            return $members;
+        }
+
+        for ($i = 1; $i <= 3; $i++) {
+            $image = $uploads['cast_actor_' . $i] ?? ($meta['cast_actor_' . $i] ?? '');
+            $instruction = sanitize_text_field(wp_unslash($_POST['cast_actor_' . $i . '_instruction'] ?? ($meta['cast_actor_' . $i . '_instruction'] ?? '')));
+
+            if ($image === '' && $instruction === '') continue;
+
+            $members[] = [
+                'name' => '',
+                'role' => $i <= 2 ? 'lead' : 'supporting',
+                'instruction' => $instruction,
+                'image' => $image,
+            ];
+        }
+
+        return $members;
     }
 
     private static function poster_meta_from_draft($draft) {
@@ -615,7 +726,11 @@ foreach (['cast_actor_1', 'cast_actor_2', 'cast_actor_3'] as $cast_key) {
         }
 
         $uploads = self::save_poster_uploads();
+        if (is_wp_error($uploads)) {
+            wp_send_json_error(['message' => $uploads->get_error_message()], 400);
+        }
         $poster_scene_direction = self::poster_scene_direction();
+        $cast_members = self::posted_cast_members($uploads);
         $payload = [
             'request_email' => sanitize_email(wp_unslash($_POST['request_email'] ?? '')),
             'title' => sanitize_text_field(wp_unslash($_POST['title'] ?? '')),
@@ -633,14 +748,15 @@ foreach (['cast_actor_1', 'cast_actor_2', 'cast_actor_3'] as $cast_key) {
             'style_reference' => $uploads['style_reference'],
             'poster_assets' => $uploads['poster_assets'],
             'poster_description' => $poster_scene_direction,
+            'cast_members' => $cast_members,
 
-            'cast_actor_1' => $uploads['cast_actor_1'],
-            'cast_actor_2' => $uploads['cast_actor_2'],
-            'cast_actor_3' => $uploads['cast_actor_3'],
+            'cast_actor_1' => $cast_members[0]['image'] ?? $uploads['cast_actor_1'],
+            'cast_actor_2' => $cast_members[1]['image'] ?? $uploads['cast_actor_2'],
+            'cast_actor_3' => $cast_members[2]['image'] ?? $uploads['cast_actor_3'],
 
-            'cast_actor_1_instruction' => sanitize_text_field(wp_unslash($_POST['cast_actor_1_instruction'] ?? '')),
-            'cast_actor_2_instruction' => sanitize_text_field(wp_unslash($_POST['cast_actor_2_instruction'] ?? '')),
-            'cast_actor_3_instruction' => sanitize_text_field(wp_unslash($_POST['cast_actor_3_instruction'] ?? '')),
+            'cast_actor_1_instruction' => $cast_members[0]['instruction'] ?? sanitize_text_field(wp_unslash($_POST['cast_actor_1_instruction'] ?? '')),
+            'cast_actor_2_instruction' => $cast_members[1]['instruction'] ?? sanitize_text_field(wp_unslash($_POST['cast_actor_2_instruction'] ?? '')),
+            'cast_actor_3_instruction' => $cast_members[2]['instruction'] ?? sanitize_text_field(wp_unslash($_POST['cast_actor_3_instruction'] ?? '')),
 ]),
 
         ];
@@ -664,6 +780,7 @@ foreach (['cast_actor_1', 'cast_actor_2', 'cast_actor_3'] as $cast_key) {
         $meta = self::poster_meta_from_draft($draft);
 
         $poster_scene_direction = self::poster_scene_direction($meta);
+        $cast_members = self::posted_cast_members([], $meta);
 
         $brief = [
             'title' => sanitize_text_field(wp_unslash($_POST['title'] ?? '')),
@@ -676,14 +793,15 @@ foreach (['cast_actor_1', 'cast_actor_2', 'cast_actor_3'] as $cast_key) {
             'mood' => sanitize_text_field(wp_unslash($_POST['mood'] ?? '')),
             'style_preset' => sanitize_text_field(wp_unslash($_POST['style_preset'] ?? '')),
             'poster_description' => $poster_scene_direction,
+            'cast_members' => $cast_members,
 
-            'cast_actor_1' => $meta['cast_actor_1'] ?? '',
-            'cast_actor_2' => $meta['cast_actor_2'] ?? '',
-            'cast_actor_3' => $meta['cast_actor_3'] ?? '',
+            'cast_actor_1' => $cast_members[0]['image'] ?? ($meta['cast_actor_1'] ?? ''),
+            'cast_actor_2' => $cast_members[1]['image'] ?? ($meta['cast_actor_2'] ?? ''),
+            'cast_actor_3' => $cast_members[2]['image'] ?? ($meta['cast_actor_3'] ?? ''),
 
-            'cast_actor_1_instruction' => sanitize_text_field(wp_unslash($_POST['cast_actor_1_instruction'] ?? ($meta['cast_actor_1_instruction'] ?? ''))),
-            'cast_actor_2_instruction' => sanitize_text_field(wp_unslash($_POST['cast_actor_2_instruction'] ?? ($meta['cast_actor_2_instruction'] ?? ''))),
-            'cast_actor_3_instruction' => sanitize_text_field(wp_unslash($_POST['cast_actor_3_instruction'] ?? ($meta['cast_actor_3_instruction'] ?? ''))),
+            'cast_actor_1_instruction' => $cast_members[0]['instruction'] ?? sanitize_text_field(wp_unslash($_POST['cast_actor_1_instruction'] ?? ($meta['cast_actor_1_instruction'] ?? ''))),
+            'cast_actor_2_instruction' => $cast_members[1]['instruction'] ?? sanitize_text_field(wp_unslash($_POST['cast_actor_2_instruction'] ?? ($meta['cast_actor_2_instruction'] ?? ''))),
+            'cast_actor_3_instruction' => $cast_members[2]['instruction'] ?? sanitize_text_field(wp_unslash($_POST['cast_actor_3_instruction'] ?? ($meta['cast_actor_3_instruction'] ?? ''))),
 
             'style_reference' => $meta['style_reference'] ?? '',
             'poster_assets' => $meta['poster_assets'] ?? [],
@@ -743,6 +861,7 @@ if (is_wp_error($previews)) {
         $selected_preview_url = esc_url_raw(wp_unslash($_POST['selected_preview_url'] ?? ''));
         $selected_preview_path = self::url_to_upload_path($selected_preview_url);
         $poster_scene_direction = self::poster_scene_direction($meta);
+        $cast_members = self::posted_cast_members([], $meta);
 
         error_log('CMSG POSTER FINALIZE AJAX TRACE: selected_preview_url=' . $selected_preview_url);
         error_log('CMSG POSTER FINALIZE AJAX TRACE: selected_preview_path=' . $selected_preview_path);
@@ -760,14 +879,15 @@ if (is_wp_error($previews)) {
             'selected_concept' => (int)($_POST['selected_concept'] ?? 0),
             'selected_preview_path' => $selected_preview_path,
             'poster_description' => $poster_scene_direction,
+            'cast_members' => $cast_members,
 
-            'cast_actor_1' => $meta['cast_actor_1'] ?? '',
-            'cast_actor_2' => $meta['cast_actor_2'] ?? '',
-            'cast_actor_3' => $meta['cast_actor_3'] ?? '',
+            'cast_actor_1' => $cast_members[0]['image'] ?? ($meta['cast_actor_1'] ?? ''),
+            'cast_actor_2' => $cast_members[1]['image'] ?? ($meta['cast_actor_2'] ?? ''),
+            'cast_actor_3' => $cast_members[2]['image'] ?? ($meta['cast_actor_3'] ?? ''),
 
-            'cast_actor_1_instruction' => sanitize_text_field(wp_unslash($_POST['cast_actor_1_instruction'] ?? ($meta['cast_actor_1_instruction'] ?? ''))),
-            'cast_actor_2_instruction' => sanitize_text_field(wp_unslash($_POST['cast_actor_2_instruction'] ?? ($meta['cast_actor_2_instruction'] ?? ''))),
-            'cast_actor_3_instruction' => sanitize_text_field(wp_unslash($_POST['cast_actor_3_instruction'] ?? ($meta['cast_actor_3_instruction'] ?? ''))),
+            'cast_actor_1_instruction' => $cast_members[0]['instruction'] ?? sanitize_text_field(wp_unslash($_POST['cast_actor_1_instruction'] ?? ($meta['cast_actor_1_instruction'] ?? ''))),
+            'cast_actor_2_instruction' => $cast_members[1]['instruction'] ?? sanitize_text_field(wp_unslash($_POST['cast_actor_2_instruction'] ?? ($meta['cast_actor_2_instruction'] ?? ''))),
+            'cast_actor_3_instruction' => $cast_members[2]['instruction'] ?? sanitize_text_field(wp_unslash($_POST['cast_actor_3_instruction'] ?? ($meta['cast_actor_3_instruction'] ?? ''))),
 
             'style_reference' => $meta['style_reference'] ?? '',
             'poster_assets' => $meta['poster_assets'] ?? [],

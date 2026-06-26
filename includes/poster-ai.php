@@ -5,6 +5,83 @@ final class CMSG_Poster_AI {
     private static $in_final_generation = false;
     private static $final_openai_calls = 0;
 
+    private static function normalized_cast_members($brief) {
+        $members = [];
+
+        if (!empty($brief['cast_members']) && is_array($brief['cast_members'])) {
+            foreach ($brief['cast_members'] as $index => $member) {
+                if (!is_array($member)) continue;
+
+                $role = sanitize_key($member['role'] ?? ((int)$index < 2 ? 'lead' : 'supporting'));
+                $role = $role === 'lead' ? 'lead' : 'supporting';
+
+                $row = [
+                    'name' => sanitize_text_field($member['name'] ?? ''),
+                    'role' => $role,
+                    'instruction' => sanitize_text_field($member['instruction'] ?? ''),
+                    'image' => is_string($member['image'] ?? '') ? (string)$member['image'] : '',
+                ];
+
+                if ($row['name'] !== '' || $row['instruction'] !== '' || $row['image'] !== '') {
+                    $members[] = $row;
+                }
+            }
+        }
+
+        if (!empty($members)) {
+            return array_slice($members, 0, 10);
+        }
+
+        for ($i = 1; $i <= 3; $i++) {
+            $image = is_string($brief['cast_actor_' . $i] ?? '') ? (string)$brief['cast_actor_' . $i] : '';
+            $instruction = sanitize_text_field($brief['cast_actor_' . $i . '_instruction'] ?? '');
+
+            if ($image === '' && $instruction === '') continue;
+
+            $members[] = [
+                'name' => '',
+                'role' => $i <= 2 ? 'lead' : 'supporting',
+                'instruction' => $instruction,
+                'image' => $image,
+            ];
+        }
+
+        return $members;
+    }
+
+    private static function cast_prompt_lines($brief) {
+        $lines = [];
+
+        foreach (self::normalized_cast_members($brief) as $index => $member) {
+            $number = $index + 1;
+            $role_label = $member['role'] === 'lead' ? 'Lead Character' : 'Supporting Character';
+            $name = $member['name'] !== '' ? $member['name'] : 'Cast Member ' . $number;
+            $instruction = $member['instruction'] !== '' ? $member['instruction'] : 'Use uploaded reference image for character identity.';
+            $hierarchy = $member['role'] === 'lead'
+                ? 'Make visually prominent in the composition.'
+                : 'Place clearly but with secondary visual hierarchy.';
+
+            $lines[] = "- Cast Member {$number} ({$role_label}) {$name}: {$instruction} {$hierarchy}";
+        }
+
+        return implode("\n", $lines);
+    }
+
+    private static function cast_counts($brief) {
+        $counts = ['total' => 0, 'lead' => 0, 'supporting' => 0];
+
+        foreach (self::normalized_cast_members($brief) as $member) {
+            $counts['total']++;
+            if (($member['role'] ?? 'supporting') === 'lead') {
+                $counts['lead']++;
+            } else {
+                $counts['supporting']++;
+            }
+        }
+
+        return $counts;
+    }
+
     public static function build_prompt($brief, $concept_variant = '') {
         $title = sanitize_text_field($brief['title'] ?? 'Untitled Film');
         $genre = sanitize_text_field($brief['genre'] ?? 'cinematic drama');
@@ -15,9 +92,11 @@ final class CMSG_Poster_AI {
             $description = trim((string)$brief['cast_scene_instruction']);
         }
 
-        $cast_actor_1_instruction = trim((string)($brief['cast_actor_1_instruction'] ?? ''));
-        $cast_actor_2_instruction = trim((string)($brief['cast_actor_2_instruction'] ?? ''));
-        $cast_actor_3_instruction = trim((string)($brief['cast_actor_3_instruction'] ?? ''));
+        $cast_lines = self::cast_prompt_lines($brief);
+        $cast_counts = self::cast_counts($brief);
+        $ensemble_text = $cast_counts['total'] >= 6
+            ? "Create an ensemble theatrical poster. Lead characters should be most prominent. Supporting characters should appear clearly but with secondary visual hierarchy. Avoid trying to make every actor equally large. Use a professional ensemble composition.\n"
+            : '';
 
         $style = sanitize_text_field($brief['style_preset'] ?? 'cinematic_premium');
         $has_style_reference = !empty($brief['style_reference']);
@@ -36,7 +115,7 @@ POSTER SCENE DIRECTION:
 {$description}
 
 PRINCIPAL CAST ROLE / CHARACTER NOTES:
-" . (!empty($cast_actor_1_instruction) ? "Actor 1: {$cast_actor_1_instruction}\n" : '') . (!empty($cast_actor_2_instruction) ? "Actor 2: {$cast_actor_2_instruction}\n" : '') . (!empty($cast_actor_3_instruction) ? "Actor 3: {$cast_actor_3_instruction}\n" : '') . "
+" . ($cast_lines !== '' ? $cast_lines . "\n" : '') . "
 
 
 STRICT BACKGROUND-ONLY RULES:
@@ -78,10 +157,12 @@ STRICT BACKGROUND-ONLY RULES:
             . "TYPOGRAPHY RULE: Do NOT render the movie title, tagline, credits, or any readable text inside the artwork. The plugin  will overlay final typography after generation. Leave clean empty title-safe space.\n"
             . "\nPOSTER SCENE DIRECTION:\n{$description}\n\n"
             . "PRINCIPAL CAST ROLE / CHARACTER NOTES:\n"
-            . (!empty($cast_actor_1_instruction) ? "- Actor 1: {$cast_actor_1_instruction}\n" : '')
-            . (!empty($cast_actor_2_instruction) ? "- Actor 2: {$cast_actor_2_instruction}\n" : '')
-            . (!empty($cast_actor_3_instruction) ? "- Actor 3: {$cast_actor_3_instruction}\n" : '')
+            . ($cast_lines !== '' ? $cast_lines . "\n" : '')
             . "\n"
+            . "CAST HIERARCHY:\n"
+            . "- Lead Character references: {$cast_counts['lead']}. Render lead characters as the most visually prominent cast members.\n"
+            . "- Supporting Character references: {$cast_counts['supporting']}. Render supporting characters clearly but smaller or secondary.\n"
+            . ($ensemble_text !== '' ? "- {$ensemble_text}" : '')
             . "REFERENCE INPUTS:\n"
             . ($has_style_reference ? "- A style reference image is provided. Use it ONLY for mood, lighting, composition, palette, typography placement, and cinematic design language. Do NOT copy faces, people, actors, logos, or text from the style reference. Actor identity must come only from poster asset images.\n" : '')
             . ($asset_count > 0
@@ -99,6 +180,8 @@ STRICT BACKGROUND-ONLY RULES:
             . "- Do not make older Black male actors look younger or smoother. Preserve age, wrinkles, beard texture, facial heaviness, and expression.\n"
             . "- Do not make Black female actors look like a different glamor model. Preserve real face shape, cheek structure, eye shape, nose, lips, hairstyle, skin tone, and body proportions from the uploaded reference.\n"
             . "- If style conflicts with likeness, prioritize likeness over style.\n"
+            . "- Do not age, de-age, distort, merge, or replace actor identities.\n"
+            . "- Preserve actor identity as closely as possible from uploaded references.\n"
             . "{$variant_text}\n\n"
             . "REQUIREMENTS:\n"
             . "- Hollywood-level theatrical poster quality\n"
@@ -124,8 +207,8 @@ STRICT BACKGROUND-ONLY RULES:
             . "- Do not repeat faces, bodies, heads, expressions, or character poses.\n"
             . "- Every character placement must represent a unique uploaded actor.\n"
             . "- Never clone or reuse a character to fill composition space.\n"
-            . "- If there are 4 uploaded actors, show 4 unique actors.\n"
-            . "- If there are 3 uploaded actors, show 3 unique actors.\n"
+            . "- If there are {$cast_counts['total']} uploaded actors, show {$cast_counts['total']} unique actors.\n"
+            . "- If more than 4 actors are uploaded, do not make every actor equally large; use lead/supporting hierarchy.\n"
             . "- Uploaded character, actor, face, object, or logo images are PRIMARY IDENTITY SOURCES, not loose inspiration\n"
             . "- Preserve the exact facial identity, skin tone, age, hairstyle, facial structure, expression, and recognizable likeness from uploaded reference images\n"
             . "- Do not redesign, replace, beautify, age-change, cartoonize, mutate, or reinterpret referenced faces\n"
@@ -471,6 +554,11 @@ private static function generate_image_file($brief, $id, $prefix, $variant, $ind
     if (!empty($cast_assets)) {
         $prompt .= "\n\nINTEGRATED MOVIE POSTER COMPOSITION:\n";
         $prompt .= "- Use the uploaded Principal Cast photos as identity and character references.\n";
+        $prompt .= "- Use Lead Character references as the largest and most visually prominent cast members.\n";
+        $prompt .= "- Use Supporting Character references clearly but with smaller, secondary visual hierarchy.\n";
+        if (count($cast_assets) >= 6) {
+            $prompt .= "- This is an ensemble poster with " . count($cast_assets) . " cast references. Do not make every actor equally large.\n";
+        }
         $prompt .= "- Create a finished cinematic poster, not a background plate and not pasted photo cutouts.\n";
         $prompt .= "- Integrate the cast into one coherent theatrical key-art composition with matching lighting, color grade, shadows, atmosphere, and depth.\n";
         $prompt .= "- Follow the Poster Scene Direction for actor placement and emotional relationships.\n";
@@ -523,15 +611,32 @@ error_log('CMSG CAST FACE MAP CHECK: cast1=' . ($brief['cast_actor_1'] ?? 'none'
 
 private static function cast_actor_assets($brief) {
     $assets = [];
-
-    foreach (['cast_actor_1', 'cast_actor_2', 'cast_actor_3'] as $key) {
-        $path = $brief[$key] ?? '';
-        if (is_string($path) && $path !== '' && file_exists($path)) {
-            $assets[] = $path;
+    $seen = [];
+    $add_asset = function($path) use (&$assets, &$seen) {
+        if (!is_string($path) || $path === '' || !file_exists($path)) {
+            return;
         }
+
+        $real = realpath($path);
+        $key = $real ? $real : $path;
+
+        if (isset($seen[$key])) {
+            return;
+        }
+
+        $seen[$key] = true;
+        $assets[] = $path;
+    };
+
+    foreach (self::normalized_cast_members($brief) as $member) {
+        $add_asset($member['image'] ?? '');
     }
 
-    return array_values(array_unique($assets));
+    foreach (['cast_actor_1', 'cast_actor_2', 'cast_actor_3'] as $key) {
+        $add_asset($brief[$key] ?? '');
+    }
+
+    return $assets;
 }
 
 private static function remove_actor_background($asset_path) {
@@ -575,17 +680,31 @@ private static function remove_actor_background($asset_path) {
 
 private static function actor_layout_slots($brief, $count, $variant = '') {
     $scene = strtolower((string)($brief['poster_description'] ?? ''));
-    $notes = [
-        strtolower((string)($brief['cast_actor_1_instruction'] ?? '')),
-        strtolower((string)($brief['cast_actor_2_instruction'] ?? '')),
-        strtolower((string)($brief['cast_actor_3_instruction'] ?? '')),
-    ];
+    $notes = [];
+    $members = self::normalized_cast_members($brief);
+    foreach ($members as $member) {
+        $notes[] = strtolower(trim(($member['name'] ?? '') . ' ' . ($member['instruction'] ?? '')));
+    }
+    if (empty($notes)) {
+        $notes = [
+            strtolower((string)($brief['cast_actor_1_instruction'] ?? '')),
+            strtolower((string)($brief['cast_actor_2_instruction'] ?? '')),
+            strtolower((string)($brief['cast_actor_3_instruction'] ?? '')),
+        ];
+    }
 
     if ($variant === 'banner') {
         $slots = [
             ['x' => 0.30, 'h' => 0.64, 'bottom' => 0.88],
             ['x' => 0.70, 'h' => 0.64, 'bottom' => 0.88],
             ['x' => 0.44, 'h' => 0.56, 'bottom' => 0.88],
+            ['x' => 0.18, 'h' => 0.48, 'bottom' => 0.88],
+            ['x' => 0.82, 'h' => 0.48, 'bottom' => 0.88],
+            ['x' => 0.55, 'h' => 0.44, 'bottom' => 0.86],
+            ['x' => 0.08, 'h' => 0.40, 'bottom' => 0.88],
+            ['x' => 0.92, 'h' => 0.40, 'bottom' => 0.88],
+            ['x' => 0.38, 'h' => 0.40, 'bottom' => 0.86],
+            ['x' => 0.62, 'h' => 0.40, 'bottom' => 0.86],
         ];
     } elseif ($count === 1) {
         $slots = [
@@ -601,6 +720,13 @@ private static function actor_layout_slots($brief, $count, $variant = '') {
             ['x' => 0.26, 'h' => 0.52, 'bottom' => 0.70],
             ['x' => 0.74, 'h' => 0.52, 'bottom' => 0.70],
             ['x' => 0.42, 'h' => 0.48, 'bottom' => 0.66],
+            ['x' => 0.58, 'h' => 0.44, 'bottom' => 0.66],
+            ['x' => 0.18, 'h' => 0.40, 'bottom' => 0.62],
+            ['x' => 0.82, 'h' => 0.40, 'bottom' => 0.62],
+            ['x' => 0.32, 'h' => 0.36, 'bottom' => 0.58],
+            ['x' => 0.68, 'h' => 0.36, 'bottom' => 0.58],
+            ['x' => 0.12, 'h' => 0.34, 'bottom' => 0.56],
+            ['x' => 0.88, 'h' => 0.34, 'bottom' => 0.56],
         ];
     }
 
@@ -1104,11 +1230,9 @@ if (!empty($brief['style_reference'])) {
     if ($normalized) $add_file('image[]', $normalized);
 }
 error_log('CMSG POSTER STYLE REF: ' . (!empty($brief['style_reference']) ? $brief['style_reference'] : 'none'));
-foreach (['cast_actor_1', 'cast_actor_2', 'cast_actor_3'] as $cast_key) {
-    if (!empty($brief[$cast_key])) {
-        $normalized = self::normalize_reference_image_for_openai($brief[$cast_key]);
-        if ($normalized) $add_file('image[]', $normalized);
-    }
+foreach (self::cast_actor_assets($brief) as $cast_asset) {
+    $normalized = self::normalize_reference_image_for_openai($cast_asset);
+    if ($normalized) $add_file('image[]', $normalized);
 }
 error_log('CMSG POSTER CAST REF COUNT: ' . count(self::cast_actor_assets($brief)));
 error_log('CMSG POSTER ASSET COUNT: ' . count($brief['poster_assets'] ?? [])); 
@@ -1149,8 +1273,8 @@ private static function is_valid_openai_image($path) {
 private static function has_reference_images($brief) {
     if (!empty($brief['style_reference']) && self::is_valid_openai_image($brief['style_reference'])) return true;
 
-    foreach (['cast_actor_1', 'cast_actor_2', 'cast_actor_3'] as $cast_key) {
-        if (!empty($brief[$cast_key]) && self::is_valid_openai_image($brief[$cast_key])) return true;
+    foreach (self::cast_actor_assets($brief) as $cast_asset) {
+        if (self::is_valid_openai_image($cast_asset)) return true;
     }
 
     if (!empty($brief['poster_assets']) && is_array($brief['poster_assets'])) {

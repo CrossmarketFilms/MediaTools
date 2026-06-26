@@ -52,7 +52,106 @@ jQuery(function($){
     $('#cmmt-finalize-progress-label').html('Waiting to create final posters...');
   }
 
+  function castMaxCount(){
+    return parseInt($('#cmmt-principal-cast-list').data('max-count') || 10, 10);
+  }
+
+  function addCastMember(index){
+    var list = $('#cmmt-principal-cast-list');
+    var template = $('#cmmt-cast-member-template').html();
+    if (!list.length || !template) return;
+
+    var number = index + 1;
+    var html = template.replace(/__INDEX__/g, index).replace(/__NUMBER__/g, number);
+    list.append(html);
+    var card = list.find('.cmmt-cast-member-card').last();
+    card.find('.cmmt-cast-role').val(index < 2 ? 'lead' : 'supporting');
+    updateCastMemberHeadings();
+    $('#cmmt-add-cast-member').prop('disabled', list.find('.cmmt-cast-member-card').length >= castMaxCount());
+  }
+
+  function updateCastMemberHeadings(){
+    var leadCount = 0;
+    var supportingCount = 0;
+
+    $('#cmmt-principal-cast-list .cmmt-cast-member-card').each(function(index){
+      var card = $(this);
+      var role = card.find('.cmmt-cast-role').val() || (index < 2 ? 'lead' : 'supporting');
+      var label;
+
+      if (role === 'lead') {
+        leadCount += 1;
+        label = 'Lead Character ' + leadCount;
+      } else {
+        supportingCount += 1;
+        label = 'Supporting Character ' + supportingCount;
+      }
+
+      card.find('.cmmt-cast-member-title').text(label);
+    });
+  }
+
+  function initCastMembers(){
+    var list = $('#cmmt-principal-cast-list');
+    if (!list.length || list.children().length) return;
+
+    var initial = parseInt(list.data('initial-count') || 6, 10);
+    var max = castMaxCount();
+    initial = Math.max(1, Math.min(max, initial));
+
+    for (var i = 0; i < initial; i++) {
+      addCastMember(i);
+    }
+  }
+
+  function collectCastMembers(){
+    var members = [];
+
+    $('#cmmt-principal-cast-list .cmmt-cast-member-card').each(function(index){
+      var card = $(this);
+      members.push({
+        name: card.find('.cmmt-cast-name').val() || '',
+        role: card.find('.cmmt-cast-role').val() || (index < 2 ? 'lead' : 'supporting'),
+        instruction: card.find('.cmmt-cast-instruction').val() || '',
+        has_image: !!(card.find('.cmmt-cast-image')[0] && card.find('.cmmt-cast-image')[0].files && card.find('.cmmt-cast-image')[0].files.length)
+      });
+    });
+
+    return members;
+  }
+
+  function syncLegacyCastFields(){
+    var members = collectCastMembers();
+    $('#cmmt-cast-actor-1-instruction').val((members[0] && members[0].instruction) || '');
+    $('#cmmt-cast-actor-2-instruction').val((members[1] && members[1].instruction) || '');
+    $('#cmmt-cast-actor-3-instruction').val((members[2] && members[2].instruction) || '');
+  }
+
+  function validateCastFiles(){
+    var allowed = ['jpg', 'jpeg', 'png', 'webp'];
+    var invalid = [];
+
+    $('#cmmt-principal-cast-list .cmmt-cast-image').each(function(index){
+      var file = this.files && this.files[0] ? this.files[0] : null;
+      if (!file) return;
+
+      var name = (file.name || '').toLowerCase();
+      var ext = name.indexOf('.') >= 0 ? name.split('.').pop() : '';
+      if (allowed.indexOf(ext) === -1) {
+        invalid.push('Cast Member ' + (index + 1) + ': ' + file.name);
+      }
+    });
+
+    if (invalid.length) {
+      setStatus('Unsupported actor reference file type. Upload JPG, JPEG, PNG, or WEBP only. Unsupported: ' + invalid.join(', '), 'is-error');
+      return false;
+    }
+
+    return true;
+  }
+
   function collectPosterPayload(){
+    var castMembers = collectCastMembers();
     return {
       request_email: $('#cmmt-poster-form [name="request_email"]').val(),
       title: $('#cmmt-poster-form [name="title"]').val(),
@@ -65,23 +164,27 @@ jQuery(function($){
       tagline_font_style: $('#cmmt-poster-form [name="tagline_font_style"]').val() || 'clean_sans',
       title_position: $('#cmmt-poster-form [name="title_position"]').val() || 'bottom_cinematic',
       preserve_identity: $('#cmmt-poster-form [name="preserve_identity"]').is(':checked') ? 1 : 0,
+      cast_members: castMembers,
 
-      cast_actor_1_instruction: $('#cmmt-cast-actor-1-instruction').val() || '',
-      cast_actor_2_instruction: $('#cmmt-cast-actor-2-instruction').val() || '',
-      cast_actor_3_instruction: $('#cmmt-cast-actor-3-instruction').val() || '',
+      cast_actor_1_instruction: (castMembers[0] && castMembers[0].instruction) || '',
+      cast_actor_2_instruction: (castMembers[1] && castMembers[1].instruction) || '',
+      cast_actor_3_instruction: (castMembers[2] && castMembers[2].instruction) || '',
     };
   }
 
 function collectPosterPayloadFormData(actionName){
     var form = document.getElementById('cmmt-poster-form');
     var fd = new FormData(form);
+    var castMembers = collectCastMembers();
 
+    syncLegacyCastFields();
     fd.set('action', actionName);
     fd.set('nonce', cmsgData.nonce);
+    fd.set('cast_members', JSON.stringify(castMembers));
 
-    fd.set('cast_actor_1_instruction', $('#cmmt-cast-actor-1-instruction').val() || '');
-    fd.set('cast_actor_2_instruction', $('#cmmt-cast-actor-2-instruction').val() || '');
-    fd.set('cast_actor_3_instruction', $('#cmmt-cast-actor-3-instruction').val() || '');
+    fd.set('cast_actor_1_instruction', (castMembers[0] && castMembers[0].instruction) || '');
+    fd.set('cast_actor_2_instruction', (castMembers[1] && castMembers[1].instruction) || '');
+    fd.set('cast_actor_3_instruction', (castMembers[2] && castMembers[2].instruction) || '');
 
     return fd;
 }
@@ -149,6 +252,16 @@ function collectPosterPayloadFormData(actionName){
 setStatus('This image is now selected for final poster creation. Complete PayPal to unlock final poster files.', 'is-success');
   });
 
+  initCastMembers();
+
+  $('#cmmt-add-cast-member').off('click.cmmtPosterCast').on('click.cmmtPosterCast', function(){
+    var count = $('#cmmt-principal-cast-list .cmmt-cast-member-card').length;
+    if (count >= castMaxCount()) return;
+    addCastMember(count);
+  });
+
+  $(document).off('change.cmmtPosterCastRole', '.cmmt-cast-role').on('change.cmmtPosterCastRole', '.cmmt-cast-role', updateCastMemberHeadings);
+
 /* FACE MAPPING BUTTON */
 
   $('#cmmt-generate-previews').off('click.cmmtPoster').on('click.cmmtPoster', function(e){
@@ -158,6 +271,10 @@ setStatus('This image is now selected for final poster creation. Complete PayPal
     var payload = collectPosterPayload();
     if (!payload.request_email || !payload.title) {
       setStatus('Email and movie title are required.', 'is-error');
+      return;
+    }
+
+    if (!validateCastFiles()) {
       return;
     }
 
@@ -266,6 +383,10 @@ setStatus('This image is now selected for final poster creation. Complete PayPal
     var selectedPreviewUrl = activePreviewUrl || previewUrls[selectedConcept] || '';
     if (!selectedPreviewUrl) {
       setStatus('Please select a poster concept before creating final files.', 'is-error');
+      return;
+    }
+
+    if (!validateCastFiles()) {
       return;
     }
 

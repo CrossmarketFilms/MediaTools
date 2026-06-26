@@ -71,26 +71,39 @@
 
     <div id="cmmt-cast-builder-panel" class="cmsg-card cmsg-card--glass cmmt-poster-step-card">
       <span class="cmsg-kicker">Step 2A: Principal Cast</span>
-      <p>Upload the main actors whose faces should be preserved and placed into the poster preview.</p>
-      <div class="cmsg-grid">
-        <label>Upload Actor 1
-          <input type="file" name="cast_actor_1" id="cmmt-cast-actor-1" accept="image/jpeg,image/png,image/webp">
-        </label>
-        <label>Actor 1 Role / Character Notes
-          <input type="text" name="cast_actor_1_instruction" id="cmmt-cast-actor-1-instruction" placeholder="Father, stern and protective">
-        </label>
-        <label>Upload Actor 2
-          <input type="file" name="cast_actor_2" id="cmmt-cast-actor-2" accept="image/jpeg,image/png,image/webp">
-        </label>
-        <label>Actor 2 Role / Character Notes
-          <input type="text" name="cast_actor_2_instruction" id="cmmt-cast-actor-2-instruction" placeholder="Daughter, conflicted and emotional">
-        </label>
-        <label>Upload Actor 3
-          <input type="file" name="cast_actor_3" id="cmmt-cast-actor-3" accept="image/jpeg,image/png,image/webp">
-        </label>
-        <label>Actor 3 Role / Character Notes
-          <input type="text" name="cast_actor_3_instruction" id="cmmt-cast-actor-3-instruction" placeholder="Mother, watching from the shadows">
-        </label>
+      <p>Upload actor reference images here. Choose whether each person is a Lead Character or Supporting Character so the poster composition can prioritize the cast correctly.</p>
+      <div id="cmmt-principal-cast-list" class="cmmt-principal-cast-list" data-initial-count="3" data-max-count="10"></div>
+      <button type="button" class="cmsg-btn" id="cmmt-add-cast-member">Add Another Cast Member</button>
+      <template id="cmmt-cast-member-template">
+        <div class="cmmt-cast-member-card" data-cast-index="__INDEX__">
+          <h4 class="cmmt-cast-member-title">Cast Member __NUMBER__</h4>
+          <div class="cmsg-grid">
+            <label><span>Actor / Character Name</span>
+              <input type="text" name="cast_members[__INDEX__][name]" class="cmmt-cast-name" placeholder="Character or actor name">
+            </label>
+            <label><span>Role</span>
+              <select name="cast_members[__INDEX__][role]" class="cmmt-cast-role">
+                <option value="lead">Lead Character</option>
+                <option value="supporting">Supporting Character</option>
+              </select>
+            </label>
+            <label class="cmsg-file"><span>Actor Reference Image</span>
+              <input type="file" name="cast_members[__INDEX__][image]" class="cmmt-cast-image" accept="image/jpeg,image/png,image/webp">
+              <small>JPG, JPEG, PNG, or WEBP only. HEIC, HEIF, SVG, and PDF are not supported.</small>
+            </label>
+            <label class="cmsg-file"><span>Character Direction / Instruction</span>
+              <textarea name="cast_members[__INDEX__][instruction]" class="cmmt-cast-instruction" rows="3" placeholder="Father, solemn on the left side. Daughter, sad and disappointed on the right side."></textarea>
+            </label>
+          </div>
+        </div>
+      </template>
+      <div class="cmmt-legacy-cast-fields" style="display:none;">
+        <input type="file" name="cast_actor_1" id="cmmt-cast-actor-1" accept="image/jpeg,image/png,image/webp">
+        <input type="file" name="cast_actor_2" id="cmmt-cast-actor-2" accept="image/jpeg,image/png,image/webp">
+        <input type="file" name="cast_actor_3" id="cmmt-cast-actor-3" accept="image/jpeg,image/png,image/webp">
+        <input type="hidden" name="cast_actor_1_instruction" id="cmmt-cast-actor-1-instruction">
+        <input type="hidden" name="cast_actor_2_instruction" id="cmmt-cast-actor-2-instruction">
+        <input type="hidden" name="cast_actor_3_instruction" id="cmmt-cast-actor-3-instruction">
       </div>
     </div>
 
@@ -99,11 +112,7 @@
       <div class="cmsg-grid">
         <label class="cmsg-file cmmt-wide">
           <span>Props, Logos & Visual References</span>
-          <p class="cmmt-upload-hint">
-            ⚠️ <strong>Do NOT upload actor photos here.</strong><br>
-Use <strong>Principal Cast</strong> for actors.<br>
-Upload only props, logos, objects, vehicles, buildings, products, or visual references that should appear in the final poster.
-          </p>
+          <p class="cmmt-upload-hint"><strong>Do not upload actor photos here. Use Principal Cast for actors. Upload only props, logos, objects, vehicles, buildings, products, or visual references that should appear in the final poster.</strong></p>
           <input type="file" name="poster_assets[]" id="cmmt-poster-assets" multiple accept="image/jpeg,image/png,image/webp">
           <small>Accepted image formats: JPG, JPEG, PNG, and WEBP only.</small>
         </label>

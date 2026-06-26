@@ -208,6 +208,32 @@ label.cmsg-file .cmmt-upload-hint {
     line-height:1.45 !important;
 }
 
+.cmmt-principal-cast-list {
+    display:grid;
+    grid-template-columns:1fr;
+    gap:14px;
+    margin:16px 0;
+}
+
+.cmmt-cast-member-card {
+    border:1px solid rgba(148, 163, 184, 0.35);
+    border-radius:12px;
+    padding:16px;
+    background:rgba(15, 23, 42, 0.58);
+}
+
+.cmmt-cast-member-card h4 {
+    margin:0 0 12px;
+    color:#f8fafc !important;
+    -webkit-text-fill-color:#f8fafc !important;
+    font-size:16px;
+    font-weight:900;
+}
+
+#cmmt-add-cast-member {
+    margin-top:4px;
+}
+
 /* Poster Studio mobile dark-card label visibility */
 #cmmt-poster-form .cmmt-poster-step-card,
 #cmmt-poster-download-card.cmmt-poster-step-card {
