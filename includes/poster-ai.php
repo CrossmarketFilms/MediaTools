@@ -53,18 +53,135 @@ final class CMSG_Poster_AI {
         $lines = [];
 
         foreach (self::normalized_cast_members($brief) as $index => $member) {
-            $number = $index + 1;
+            $actor_label = self::actor_registry_label($index);
             $role_label = $member['role'] === 'lead' ? 'Lead Character' : 'Supporting Character';
-            $name = $member['name'] !== '' ? ' ' . $member['name'] : '';
+            $name = $member['name'] !== '' ? $member['name'] : 'Uploaded cast reference ' . $actor_label;
             $instruction = $member['instruction'] !== '' ? $member['instruction'] : 'Use uploaded reference image for character identity.';
+            $placement = self::placement_for_cast_member($member, $index, self::cast_counts($brief)['total']);
             $hierarchy = $member['role'] === 'lead'
-                ? 'Make visually prominent in the composition.'
-                : 'Place clearly but with secondary visual hierarchy.';
+                ? 'Primary visual hierarchy; visually prominent.'
+                : 'Secondary visual hierarchy; clearly visible but smaller than leads.';
 
-            $lines[] = "- Cast Member {$number} ({$role_label}){$name}: {$instruction} {$hierarchy}";
+            $lines[] = "{$actor_label}\n"
+                . "Role: {$role_label}\n"
+                . "Priority: {$hierarchy}\n"
+                . "Placement: {$placement}\n"
+                . "Description: {$name}. {$instruction}";
         }
 
-        return implode("\n", $lines);
+        return implode("\n\n", $lines);
+    }
+
+    private static function actor_registry_label($index) {
+        $letters = range('A', 'J');
+        return 'Actor ' . ($letters[(int)$index] ?? ((int)$index + 1));
+    }
+
+    private static function placement_for_cast_member($member, $index, $total) {
+        $instruction = strtolower((string)($member['instruction'] ?? ''));
+
+        $placements = [
+            'lower left' => 'Lower Left',
+            'bottom left' => 'Lower Left',
+            'lower right' => 'Lower Right',
+            'bottom right' => 'Lower Right',
+            'upper left' => 'Upper Left',
+            'top left' => 'Upper Left',
+            'upper right' => 'Upper Right',
+            'top right' => 'Upper Right',
+            'center top' => 'Center Top',
+            'top center' => 'Center Top',
+            'upper center' => 'Center Top',
+            'hover' => 'Center Top',
+            'above' => 'Center Top',
+            'center' => 'Center',
+            'middle' => 'Center',
+            'left side' => 'Left',
+            'on the left' => 'Left',
+            'positioned left' => 'Left',
+            'right side' => 'Right',
+            'on the right' => 'Right',
+            'positioned right' => 'Right',
+            'lower center' => 'Lower Center',
+            'bottom center' => 'Lower Center',
+        ];
+
+        foreach ($placements as $needle => $placement) {
+            if (strpos($instruction, $needle) !== false) {
+                return $placement;
+            }
+        }
+
+        if ((int)$total <= 1) {
+            return 'Center';
+        }
+
+        $defaults = [
+            'Center Top',
+            'Left',
+            'Right',
+            'Lower Left',
+            'Lower Right',
+            'Upper Left',
+            'Upper Right',
+            'Lower Center',
+            'Far Left',
+            'Far Right',
+        ];
+
+        return $defaults[(int)$index] ?? 'Secondary Ensemble Position';
+    }
+
+    private static function identity_registry_prompt($brief) {
+        $cast_members = self::normalized_cast_members($brief);
+        $total = count($cast_members);
+
+        if ($total < 1) {
+            return "UNIQUE CAST REGISTRY\n"
+                . "There are no uploaded cast members. Do not invent recognizable lead actors unless the scene direction explicitly requests anonymous people.\n";
+        }
+
+        return "UNIQUE CAST REGISTRY\n"
+            . "There are exactly {$total} uploaded cast members.\n"
+            . "Each uploaded actor reference represents ONE unique individual.\n"
+            . "Each uploaded actor must appear exactly once in the final composition.\n"
+            . "Never duplicate an uploaded actor.\n"
+            . "Never create alternate versions of the same actor.\n"
+            . "Never place the same actor in the foreground and background.\n"
+            . "Never reuse an uploaded actor as crowd, silhouette, reflection, ghost image, montage image, or secondary portrait.\n"
+            . "If additional people are required for atmosphere, generate anonymous extras that DO NOT resemble any uploaded actor.\n"
+            . "The final poster must contain exactly {$total} unique recognizable uploaded actors.\n";
+    }
+
+    private static function composition_registry_rules($brief) {
+        $counts = self::cast_counts($brief);
+
+        return "EXPLICIT COMPOSITION RULES\n"
+            . "- Lead actors should occupy the primary visual hierarchy.\n"
+            . "- Supporting actors should occupy secondary positions.\n"
+            . "- Each uploaded actor must occupy a unique position.\n"
+            . "- No uploaded actor may appear more than once.\n"
+            . "- Do not create mirrored versions of uploaded actors.\n"
+            . "- Do not create alternate expressions of the same uploaded actor.\n"
+            . "- Do not repeat uploaded faces in lower montage sections.\n"
+            . "- Do not repeat uploaded faces in the background.\n"
+            . "- Do not reuse uploaded actors as silhouettes, reflections, ghosts, memories, inset portraits, or crowd members.\n"
+            . "- If there are {$counts['total']} uploaded actors, the poster must show {$counts['total']} uploaded actor identities total, not more.\n";
+    }
+
+    private static function placement_mapping_prompt($brief) {
+        $members = self::normalized_cast_members($brief);
+        if (empty($members)) {
+            return '';
+        }
+
+        $lines = ["PLACEMENT MAPPING"];
+        $total = count($members);
+        foreach ($members as $index => $member) {
+            $lines[] = self::actor_registry_label($index) . ': ' . self::placement_for_cast_member($member, $index, $total);
+        }
+
+        return implode("\n", $lines) . "\n";
     }
 
     private static function cast_counts($brief) {
@@ -94,6 +211,9 @@ final class CMSG_Poster_AI {
 
         $cast_lines = self::cast_prompt_lines($brief);
         $cast_counts = self::cast_counts($brief);
+        $identity_registry = self::identity_registry_prompt($brief);
+        $composition_rules = self::composition_registry_rules($brief);
+        $placement_mapping = self::placement_mapping_prompt($brief);
         $ensemble_text = $cast_counts['total'] >= 6
             ? "Create an ensemble theatrical poster. Lead characters should be most prominent. Supporting characters should appear clearly but with secondary visual hierarchy. Avoid trying to make every actor equally large. Use a professional ensemble composition.\n"
             : '';
@@ -111,12 +231,14 @@ GENRE: {$genre}
 MOOD: {$mood}
 STYLE PRESET: {$style}
 
-POSTER SCENE DIRECTION:
-{$description}
+{$identity_registry}
 
-PRINCIPAL CAST ROLE / CHARACTER NOTES:
+INDIVIDUAL ACTOR REGISTRY:
 " . ($cast_lines !== '' ? $cast_lines . "\n" : '') . "
 
+{$placement_mapping}
+POSTER SCENE DIRECTION:
+{$description}
 
 STRICT BACKGROUND-ONLY RULES:
 - Do NOT generate people.
@@ -155,10 +277,13 @@ STRICT BACKGROUND-ONLY RULES:
         return "Create a high-end cinematic movie poster key art concept.\n\n"
             . "POSTER PROJECT NAME: {$title}\nGENRE: {$genre}\nMOOD: {$mood}\nSTYLE PRESET: {$style}\n"
             . "TYPOGRAPHY RULE: Do NOT render the movie title, tagline, credits, or any readable text inside the artwork. The plugin  will overlay final typography after generation. Leave clean empty title-safe space.\n"
-            . "\nPOSTER SCENE DIRECTION:\n{$description}\n\n"
-            . "PRINCIPAL CAST ROLE / CHARACTER NOTES:\n"
+            . "\n{$identity_registry}\n"
+            . "INDIVIDUAL ACTOR REGISTRY:\n"
             . ($cast_lines !== '' ? $cast_lines . "\n" : '')
             . "\n"
+            . "{$placement_mapping}\n"
+            . "{$composition_rules}\n"
+            . "POSTER SCENE DIRECTION:\n{$description}\n\n"
             . "CAST HIERARCHY:\n"
             . "- Lead Character references: {$cast_counts['lead']}. Render lead characters as the most visually prominent cast members.\n"
             . "- Supporting Character references: {$cast_counts['supporting']}. Render supporting characters clearly but smaller or secondary.\n"
