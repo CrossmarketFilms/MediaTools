@@ -55,13 +55,13 @@ final class CMSG_Poster_AI {
         foreach (self::normalized_cast_members($brief) as $index => $member) {
             $number = $index + 1;
             $role_label = $member['role'] === 'lead' ? 'Lead Character' : 'Supporting Character';
-            $name = $member['name'] !== '' ? $member['name'] : 'Cast Member ' . $number;
+            $name = $member['name'] !== '' ? ' ' . $member['name'] : '';
             $instruction = $member['instruction'] !== '' ? $member['instruction'] : 'Use uploaded reference image for character identity.';
             $hierarchy = $member['role'] === 'lead'
                 ? 'Make visually prominent in the composition.'
                 : 'Place clearly but with secondary visual hierarchy.';
 
-            $lines[] = "- Cast Member {$number} ({$role_label}) {$name}: {$instruction} {$hierarchy}";
+            $lines[] = "- Cast Member {$number} ({$role_label}){$name}: {$instruction} {$hierarchy}";
         }
 
         return implode("\n", $lines);
@@ -162,6 +162,7 @@ STRICT BACKGROUND-ONLY RULES:
             . "CAST HIERARCHY:\n"
             . "- Lead Character references: {$cast_counts['lead']}. Render lead characters as the most visually prominent cast members.\n"
             . "- Supporting Character references: {$cast_counts['supporting']}. Render supporting characters clearly but smaller or secondary.\n"
+            . "- Each cast reference must appear exactly once as one character only. Do not repeat any cast member as a second face, background extra, bottom montage, reflection, or crowd duplicate.\n"
             . ($ensemble_text !== '' ? "- {$ensemble_text}" : '')
             . "REFERENCE INPUTS:\n"
             . ($has_style_reference ? "- A style reference image is provided. Use it ONLY for mood, lighting, composition, palette, typography placement, and cinematic design language. Do NOT copy faces, people, actors, logos, or text from the style reference. Actor identity must come only from poster asset images.\n" : '')
@@ -203,10 +204,13 @@ STRICT BACKGROUND-ONLY RULES:
             . "- No distorted faces, no extra fingers, no unreadable fake text\n"
             . "\nSUBJECT / FACE PRESERVATION RULES:\n"
             . "- Each uploaded actor image may appear ONLY ONCE in the composition.\n"
+            . "- Each cast reference must appear exactly once as one character only.\n"
             . "- Do not duplicate the same actor in multiple locations.\n"
+            . "- Do not create secondary copies, background crowd copies, montage repeats, reflection duplicates, or miniature duplicate versions of any uploaded cast member.\n"
             . "- Do not repeat faces, bodies, heads, expressions, or character poses.\n"
             . "- Every character placement must represent a unique uploaded actor.\n"
             . "- Never clone or reuse a character to fill composition space.\n"
+            . "- If the composition needs background crowd or distant figures, use anonymous silhouettes only and never repeat uploaded cast identities.\n"
             . "- If there are {$cast_counts['total']} uploaded actors, show {$cast_counts['total']} unique actors.\n"
             . "- If more than 4 actors are uploaded, do not make every actor equally large; use lead/supporting hierarchy.\n"
             . "- Uploaded character, actor, face, object, or logo images are PRIMARY IDENTITY SOURCES, not loose inspiration\n"
@@ -234,6 +238,8 @@ STRICT BACKGROUND-ONLY RULES:
             . "- Do not mirror or replicate any uploaded character.\n"
             . "- Do not create duplicate heads or duplicate faces.\n"
             . "- Do not invent extra cast members unless the user explicitly requested background extras.\n"
+            . "- For ensemble posters, reduce the size of supporting characters instead of duplicating lead characters.\n"
+            . "- Do not create a second lower-row montage that repeats the same uploaded cast identities.\n"
             . "\nBACKGROUND GENERATION RULES:\n"
             . "- Generate environment only.\n"
             . "- No people.\n"

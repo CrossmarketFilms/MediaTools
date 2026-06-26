@@ -76,7 +76,10 @@
       <button type="button" class="cmsg-btn" id="cmmt-add-cast-member">Add Another Cast Member</button>
       <template id="cmmt-cast-member-template">
         <div class="cmmt-cast-member-card" data-cast-index="__INDEX__">
-          <h4 class="cmmt-cast-member-title">Cast Member __NUMBER__</h4>
+          <div class="cmmt-cast-member-header">
+            <h4 class="cmmt-cast-member-title">Cast Member __NUMBER__</h4>
+            <button type="button" class="cmmt-remove-cast-member" aria-label="Remove cast member">Remove</button>
+          </div>
           <div class="cmsg-grid">
             <label><span>Actor / Character Name</span>
               <input type="text" name="cast_members[__INDEX__][name]" class="cmmt-cast-name" placeholder="Character or actor name">

@@ -66,8 +66,7 @@ jQuery(function($){
     list.append(html);
     var card = list.find('.cmmt-cast-member-card').last();
     card.find('.cmmt-cast-role').val(index < 2 ? 'lead' : 'supporting');
-    updateCastMemberHeadings();
-    $('#cmmt-add-cast-member').prop('disabled', list.find('.cmmt-cast-member-card').length >= castMaxCount());
+    refreshCastMemberIndexes();
   }
 
   function updateCastMemberHeadings(){
@@ -91,6 +90,22 @@ jQuery(function($){
     });
   }
 
+  function refreshCastMemberIndexes(){
+    var list = $('#cmmt-principal-cast-list');
+
+    list.find('.cmmt-cast-member-card').each(function(index){
+      var card = $(this);
+      card.attr('data-cast-index', index);
+      card.find('.cmmt-cast-name').attr('name', 'cast_members[' + index + '][name]');
+      card.find('.cmmt-cast-role').attr('name', 'cast_members[' + index + '][role]');
+      card.find('.cmmt-cast-image').attr('name', 'cast_members[' + index + '][image]');
+      card.find('.cmmt-cast-instruction').attr('name', 'cast_members[' + index + '][instruction]');
+    });
+
+    updateCastMemberHeadings();
+    $('#cmmt-add-cast-member').prop('disabled', list.find('.cmmt-cast-member-card').length >= castMaxCount());
+  }
+
   function initCastMembers(){
     var list = $('#cmmt-principal-cast-list');
     if (!list.length || list.children().length) return;
@@ -102,6 +117,8 @@ jQuery(function($){
     for (var i = 0; i < initial; i++) {
       addCastMember(i);
     }
+
+    refreshCastMemberIndexes();
   }
 
   function collectCastMembers(){
@@ -258,6 +275,15 @@ setStatus('This image is now selected for final poster creation. Complete PayPal
     var count = $('#cmmt-principal-cast-list .cmmt-cast-member-card').length;
     if (count >= castMaxCount()) return;
     addCastMember(count);
+  });
+
+  $(document).off('click.cmmtPosterCastRemove', '.cmmt-remove-cast-member').on('click.cmmtPosterCastRemove', '.cmmt-remove-cast-member', function(){
+    $(this).closest('.cmmt-cast-member-card').remove();
+    if (!$('#cmmt-principal-cast-list .cmmt-cast-member-card').length) {
+      addCastMember(0);
+      return;
+    }
+    refreshCastMemberIndexes();
   });
 
   $(document).off('change.cmmtPosterCastRole', '.cmmt-cast-role').on('change.cmmtPosterCastRole', '.cmmt-cast-role', updateCastMemberHeadings);
