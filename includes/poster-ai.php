@@ -184,6 +184,106 @@ final class CMSG_Poster_AI {
         return implode("\n", $lines) . "\n";
     }
 
+    private static function poster_layout_key($brief) {
+        $layout = sanitize_key($brief['poster_layout'] ?? '');
+        $allowed = [
+            'solo_hero',
+            'dual_lead',
+            'three_character_triangle',
+            'ensemble_portrait_grid',
+            'floating_heads_ensemble',
+            'no_cast_background_only',
+        ];
+
+        if (in_array($layout, $allowed, true)) {
+            return $layout;
+        }
+
+        $count = self::cast_counts($brief)['total'];
+        if ($count > 5) return 'ensemble_portrait_grid';
+        if ($count === 0) return 'no_cast_background_only';
+        if ($count === 1) return 'solo_hero';
+        if ($count === 2) return 'dual_lead';
+        if ($count === 3) return 'three_character_triangle';
+        return 'floating_heads_ensemble';
+    }
+
+    private static function poster_layout_label($layout) {
+        $labels = [
+            'solo_hero' => 'Solo Hero',
+            'dual_lead' => 'Dual Lead',
+            'three_character_triangle' => 'Three Character Triangle',
+            'ensemble_portrait_grid' => 'Ensemble Portrait Grid',
+            'floating_heads_ensemble' => 'Floating Heads Ensemble',
+            'no_cast_background_only' => 'No Cast / Background Only',
+        ];
+
+        return $labels[$layout] ?? 'Three Character Triangle';
+    }
+
+    private static function poster_layout_prompt($brief) {
+        $layout = self::poster_layout_key($brief);
+        $counts = self::cast_counts($brief);
+        $total = $counts['total'];
+
+        $prompt = "POSTER LAYOUT STRATEGY: " . self::poster_layout_label($layout) . "\n";
+
+        switch ($layout) {
+            case 'solo_hero':
+                $prompt .= "- Use one primary hero portrait composition.\n"
+                    . "- If more than one actor is uploaded, keep additional uploaded actors smaller and secondary without repeating anyone.\n"
+                    . "- Do not create duplicate portraits, lower montage rows, reflections, silhouettes, or background copies.\n";
+                break;
+
+            case 'dual_lead':
+                $prompt .= "- Use a two-lead composition with the first two uploaded actors as the primary visual relationship.\n"
+                    . "- Place the two lead actors in distinct left/right or foreground/background positions.\n"
+                    . "- Supporting actors, if present, must be smaller and appear once only.\n"
+                    . "- Do not repeat either lead in lower portraits, background portraits, reflections, or montage strips.\n";
+                break;
+
+            case 'three_character_triangle':
+                $prompt .= "- Use a three-character triangle layout with three distinct actor positions.\n"
+                    . "- Arrange the first three uploaded actors as a clean triangular key-art composition.\n"
+                    . "- Supporting actors beyond three, if present, must occupy one clear secondary position each.\n"
+                    . "- Do not repeat actors as extra heads, lower montage copies, or background versions.\n";
+                break;
+
+            case 'ensemble_portrait_grid':
+                $prompt .= "- Use a structured portrait grid or tiered key-art layout, not a montage/collage.\n"
+                    . "- Use one clean portrait position per uploaded actor.\n"
+                    . "- Each uploaded actor appears once only.\n"
+                    . "- No actor may appear twice in foreground, background, reflection, silhouette, vehicle window, or lower montage.\n"
+                    . "- Do not use repeated lower portraits or background versions of actors.\n"
+                    . "- For 6-10 actors, use smaller but distinct individual positions with clear separation between faces.\n"
+                    . "- Keep the design cinematic and professional while preserving the grid/tier structure.\n";
+                break;
+
+            case 'floating_heads_ensemble':
+                $prompt .= "- Use cinematic floating-head style with depth and hierarchy.\n"
+                    . "- Each uploaded actor must appear once only as one floating-head or portrait element.\n"
+                    . "- No repeated portraits, no duplicate lower montage, no background copy of an uploaded actor.\n"
+                    . "- Supporting actors may be smaller, but each still receives only one distinct portrait position.\n";
+                break;
+
+            case 'no_cast_background_only':
+                $prompt .= "- Create background/environment key art only.\n"
+                    . "- Do not generate cast portraits, faces, bodies, silhouettes, crowds, or human figures.\n"
+                    . "- Use mood, setting, props, symbols, atmosphere, and cinematic lighting instead of actors.\n";
+                break;
+        }
+
+        if ($total > 5 && $layout !== 'ensemble_portrait_grid') {
+            $prompt .= "- Large cast note: Ensemble Portrait Grid is recommended for {$total} actors; because another layout was selected, be extra strict that each uploaded actor appears once only.\n";
+        }
+
+        return $prompt;
+    }
+
+    private static function should_use_cast_references($brief) {
+        return self::poster_layout_key($brief) !== 'no_cast_background_only';
+    }
+
     private static function cast_counts($brief) {
         $counts = ['total' => 0, 'lead' => 0, 'supporting' => 0];
 
@@ -214,6 +314,8 @@ final class CMSG_Poster_AI {
         $identity_registry = self::identity_registry_prompt($brief);
         $composition_rules = self::composition_registry_rules($brief);
         $placement_mapping = self::placement_mapping_prompt($brief);
+        $layout = self::poster_layout_key($brief);
+        $layout_prompt = self::poster_layout_prompt($brief);
         $ensemble_text = $cast_counts['total'] >= 6
             ? "Create an ensemble theatrical poster. Lead characters should be most prominent. Supporting characters should appear clearly but with secondary visual hierarchy. Avoid trying to make every actor equally large. Use a professional ensemble composition.\n"
             : '';
@@ -222,6 +324,9 @@ final class CMSG_Poster_AI {
         $has_style_reference = !empty($brief['style_reference']);
         $asset_count = !empty($brief['poster_assets']) && is_array($brief['poster_assets']) ? count($brief['poster_assets']) : 0;
 $background_only = !empty($brief['background_only']);
+if ($layout === 'no_cast_background_only') {
+    $background_only = true;
+}
 
 if ($background_only) {
     return "Create a high-end cinematic movie poster BACKGROUND PLATE ONLY.
@@ -232,6 +337,8 @@ MOOD: {$mood}
 STYLE PRESET: {$style}
 
 {$identity_registry}
+
+{$layout_prompt}
 
 INDIVIDUAL ACTOR REGISTRY:
 " . ($cast_lines !== '' ? $cast_lines . "\n" : '') . "
@@ -278,6 +385,7 @@ STRICT BACKGROUND-ONLY RULES:
             . "POSTER PROJECT NAME: {$title}\nGENRE: {$genre}\nMOOD: {$mood}\nSTYLE PRESET: {$style}\n"
             . "TYPOGRAPHY RULE: Do NOT render the movie title, tagline, credits, or any readable text inside the artwork. The plugin  will overlay final typography after generation. Leave clean empty title-safe space.\n"
             . "\n{$identity_registry}\n"
+            . "\n{$layout_prompt}\n"
             . "INDIVIDUAL ACTOR REGISTRY:\n"
             . ($cast_lines !== '' ? $cast_lines . "\n" : '')
             . "\n"
@@ -678,17 +786,23 @@ private static function generate_image_file($brief, $id, $prefix, $variant, $ind
         $openai_size = '1536x1024';
     }
 
-    $cast_assets = self::cast_actor_assets($brief);
+    $layout = self::poster_layout_key($brief);
+    $cast_assets = self::should_use_cast_references($brief) ? self::cast_actor_assets($brief) : [];
 
     $prompt = self::build_prompt($brief, $variant);
 
     if (!empty($cast_assets)) {
         $prompt .= "\n\nINTEGRATED MOVIE POSTER COMPOSITION:\n";
+        $prompt .= self::poster_layout_prompt($brief);
         $prompt .= "- Use the uploaded Principal Cast photos as identity and character references.\n";
         $prompt .= "- Use Lead Character references as the largest and most visually prominent cast members.\n";
         $prompt .= "- Use Supporting Character references clearly but with smaller, secondary visual hierarchy.\n";
         if (count($cast_assets) >= 6) {
-            $prompt .= "- This is an ensemble poster with " . count($cast_assets) . " cast references. Do not make every actor equally large.\n";
+            if ($layout === 'ensemble_portrait_grid') {
+                $prompt .= "- This is an ensemble portrait grid with " . count($cast_assets) . " cast references. Use distinct grid/tier positions instead of montage repetition.\n";
+            } else {
+                $prompt .= "- This is an ensemble poster with " . count($cast_assets) . " cast references. Do not make every actor equally large, and do not solve the layout by repeating actors in a montage.\n";
+            }
         }
         $prompt .= "- Create a finished cinematic poster, not a background plate and not pasted photo cutouts.\n";
         $prompt .= "- Integrate the cast into one coherent theatrical key-art composition with matching lighting, color grade, shadows, atmosphere, and depth.\n";
@@ -1361,11 +1475,12 @@ if (!empty($brief['style_reference'])) {
     if ($normalized) $add_file('image[]', $normalized);
 }
 error_log('CMSG POSTER STYLE REF: ' . (!empty($brief['style_reference']) ? $brief['style_reference'] : 'none'));
-foreach (self::cast_actor_assets($brief) as $cast_asset) {
+$cast_reference_assets = self::should_use_cast_references($brief) ? self::cast_actor_assets($brief) : [];
+foreach ($cast_reference_assets as $cast_asset) {
     $normalized = self::normalize_reference_image_for_openai($cast_asset);
     if ($normalized) $add_file('image[]', $normalized);
 }
-error_log('CMSG POSTER CAST REF COUNT: ' . count(self::cast_actor_assets($brief)));
+error_log('CMSG POSTER CAST REF COUNT: ' . count($cast_reference_assets));
 error_log('CMSG POSTER ASSET COUNT: ' . count($brief['poster_assets'] ?? [])); 
 
 if (!empty($brief['poster_assets']) && is_array($brief['poster_assets'])) {
@@ -1404,8 +1519,10 @@ private static function is_valid_openai_image($path) {
 private static function has_reference_images($brief) {
     if (!empty($brief['style_reference']) && self::is_valid_openai_image($brief['style_reference'])) return true;
 
-    foreach (self::cast_actor_assets($brief) as $cast_asset) {
-        if (self::is_valid_openai_image($cast_asset)) return true;
+    if (self::should_use_cast_references($brief)) {
+        foreach (self::cast_actor_assets($brief) as $cast_asset) {
+            if (self::is_valid_openai_image($cast_asset)) return true;
+        }
     }
 
     if (!empty($brief['poster_assets']) && is_array($brief['poster_assets'])) {

@@ -711,6 +711,30 @@ CMSG_Drafts::update_draft($draft->id, [
         return '';
     }
 
+    private static function poster_layout($cast_members = [], $meta = []) {
+        $layout = sanitize_key(wp_unslash($_POST['poster_layout'] ?? ($meta['poster_layout'] ?? '')));
+        $allowed = [
+            'solo_hero',
+            'dual_lead',
+            'three_character_triangle',
+            'ensemble_portrait_grid',
+            'floating_heads_ensemble',
+            'no_cast_background_only',
+        ];
+
+        if (in_array($layout, $allowed, true)) {
+            return $layout;
+        }
+
+        $count = is_array($cast_members) ? count($cast_members) : 0;
+        if ($count > 5) return 'ensemble_portrait_grid';
+        if ($count === 0) return 'no_cast_background_only';
+        if ($count === 1) return 'solo_hero';
+        if ($count === 2) return 'dual_lead';
+        if ($count === 3) return 'three_character_triangle';
+        return 'floating_heads_ensemble';
+    }
+
     private static function url_to_upload_path($url) {
         $uploads = wp_upload_dir();
         if (strpos($url, $uploads['baseurl']) === 0) {
@@ -731,6 +755,7 @@ CMSG_Drafts::update_draft($draft->id, [
         }
         $poster_scene_direction = self::poster_scene_direction();
         $cast_members = self::posted_cast_members($uploads);
+        $poster_layout = self::poster_layout($cast_members);
         $payload = [
             'request_email' => sanitize_email(wp_unslash($_POST['request_email'] ?? '')),
             'title' => sanitize_text_field(wp_unslash($_POST['title'] ?? '')),
@@ -742,11 +767,13 @@ CMSG_Drafts::update_draft($draft->id, [
             'genre' => sanitize_text_field(wp_unslash($_POST['genre'] ?? '')),
             'mood' => sanitize_text_field(wp_unslash($_POST['mood'] ?? '')),
             'style_preset' => sanitize_text_field(wp_unslash($_POST['style_preset'] ?? '')),
+            'poster_layout' => $poster_layout,
             'poster_description' => $poster_scene_direction,
 
             'source_reference' => wp_json_encode([
             'style_reference' => $uploads['style_reference'],
             'poster_assets' => $uploads['poster_assets'],
+            'poster_layout' => $poster_layout,
             'poster_description' => $poster_scene_direction,
             'cast_members' => $cast_members,
 
@@ -781,6 +808,7 @@ CMSG_Drafts::update_draft($draft->id, [
 
         $poster_scene_direction = self::poster_scene_direction($meta);
         $cast_members = self::posted_cast_members([], $meta);
+        $poster_layout = self::poster_layout($cast_members, $meta);
 
         $brief = [
             'title' => sanitize_text_field(wp_unslash($_POST['title'] ?? '')),
@@ -792,6 +820,7 @@ CMSG_Drafts::update_draft($draft->id, [
             'genre' => sanitize_text_field(wp_unslash($_POST['genre'] ?? '')),
             'mood' => sanitize_text_field(wp_unslash($_POST['mood'] ?? '')),
             'style_preset' => sanitize_text_field(wp_unslash($_POST['style_preset'] ?? '')),
+            'poster_layout' => $poster_layout,
             'poster_description' => $poster_scene_direction,
             'cast_members' => $cast_members,
 
@@ -862,6 +891,7 @@ if (is_wp_error($previews)) {
         $selected_preview_path = self::url_to_upload_path($selected_preview_url);
         $poster_scene_direction = self::poster_scene_direction($meta);
         $cast_members = self::posted_cast_members([], $meta);
+        $poster_layout = self::poster_layout($cast_members, $meta);
 
         error_log('CMSG POSTER FINALIZE AJAX TRACE: selected_preview_url=' . $selected_preview_url);
         error_log('CMSG POSTER FINALIZE AJAX TRACE: selected_preview_path=' . $selected_preview_path);
@@ -876,6 +906,7 @@ if (is_wp_error($previews)) {
             'genre' => sanitize_text_field(wp_unslash($_POST['genre'] ?? '')),
             'mood' => sanitize_text_field(wp_unslash($_POST['mood'] ?? '')),
             'style_preset' => sanitize_text_field(wp_unslash($_POST['style_preset'] ?? '')),
+            'poster_layout' => $poster_layout,
             'selected_concept' => (int)($_POST['selected_concept'] ?? 0),
             'selected_preview_path' => $selected_preview_path,
             'poster_description' => $poster_scene_direction,

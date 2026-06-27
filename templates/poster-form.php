@@ -37,6 +37,17 @@
             <option value="bold_thriller">Bold Thriller</option>
           </select>
         </label>
+        <label><span>Poster layout</span>
+          <select name="poster_layout" id="cmmt-poster-layout">
+            <option value="solo_hero">Solo Hero</option>
+            <option value="dual_lead">Dual Lead</option>
+            <option value="three_character_triangle" selected>Three Character Triangle</option>
+            <option value="ensemble_portrait_grid">Ensemble Portrait Grid</option>
+            <option value="floating_heads_ensemble">Floating Heads Ensemble</option>
+            <option value="no_cast_background_only">No Cast / Background Only</option>
+          </select>
+          <small>For large casts, Ensemble Portrait Grid is recommended to reduce duplicate faces.</small>
+        </label>
         <label><span>Title font style</span>
           <select name="title_font_style">
             <option value="cinematic_bold">Cinematic Bold</option>

@@ -56,6 +56,37 @@ jQuery(function($){
     return parseInt($('#cmmt-principal-cast-list').data('max-count') || 10, 10);
   }
 
+  function filledCastCount(){
+    var count = 0;
+
+    $('#cmmt-principal-cast-list .cmmt-cast-member-card').each(function(){
+      var card = $(this);
+      var hasText = !!($.trim(card.find('.cmmt-cast-name').val() || '') || $.trim(card.find('.cmmt-cast-instruction').val() || ''));
+      var input = card.find('.cmmt-cast-image')[0];
+      var hasImage = !!(input && input.files && input.files.length);
+      if (hasText || hasImage) count += 1;
+    });
+
+    return count;
+  }
+
+  function recommendedPosterLayout(count){
+    if (count > 5) return 'ensemble_portrait_grid';
+    if (count === 0) return 'no_cast_background_only';
+    if (count === 1) return 'solo_hero';
+    if (count === 2) return 'dual_lead';
+    if (count === 3) return 'three_character_triangle';
+    return 'floating_heads_ensemble';
+  }
+
+  function syncRecommendedPosterLayout(){
+    var layout = $('#cmmt-poster-layout');
+    if (!layout.length || layout.data('userSelected')) return;
+    var count = filledCastCount();
+    if (count < 1) return;
+    layout.val(recommendedPosterLayout(count));
+  }
+
   function addCastMember(index){
     var list = $('#cmmt-principal-cast-list');
     var template = $('#cmmt-cast-member-template').html();
@@ -104,6 +135,7 @@ jQuery(function($){
 
     updateCastMemberHeadings();
     $('#cmmt-add-cast-member').prop('disabled', list.find('.cmmt-cast-member-card').length >= castMaxCount());
+    syncRecommendedPosterLayout();
   }
 
   function initCastMembers(){
@@ -169,6 +201,7 @@ jQuery(function($){
 
   function collectPosterPayload(){
     var castMembers = collectCastMembers();
+    syncRecommendedPosterLayout();
     return {
       request_email: $('#cmmt-poster-form [name="request_email"]').val(),
       title: $('#cmmt-poster-form [name="title"]').val(),
@@ -176,6 +209,7 @@ jQuery(function($){
       genre: $('#cmmt-poster-form [name="genre"]').val(),
       mood: $('#cmmt-poster-form [name="mood"]').val(),
       style_preset: $('#cmmt-poster-form [name="style_preset"]').val(),
+      poster_layout: $('#cmmt-poster-form [name="poster_layout"]').val(),
       poster_description: $('#cmmt-poster-form [name="poster_description"]').val(),
       title_font_style: $('#cmmt-poster-form [name="title_font_style"]').val() || 'cinematic_bold',
       tagline_font_style: $('#cmmt-poster-form [name="tagline_font_style"]').val() || 'clean_sans',
@@ -194,9 +228,11 @@ function collectPosterPayloadFormData(actionName){
     var fd = new FormData(form);
     var castMembers = collectCastMembers();
 
+    syncRecommendedPosterLayout();
     syncLegacyCastFields();
     fd.set('action', actionName);
     fd.set('nonce', cmsgData.nonce);
+    fd.set('poster_layout', $('#cmmt-poster-form [name="poster_layout"]').val() || recommendedPosterLayout(filledCastCount()));
     fd.set('cast_members', JSON.stringify(castMembers));
 
     fd.set('cast_actor_1_instruction', (castMembers[0] && castMembers[0].instruction) || '');
@@ -284,6 +320,13 @@ setStatus('This image is now selected for final poster creation. Complete PayPal
       return;
     }
     refreshCastMemberIndexes();
+  });
+
+  $(document).off('input.cmmtPosterCastLayout change.cmmtPosterCastLayout', '.cmmt-cast-name, .cmmt-cast-instruction, .cmmt-cast-image')
+    .on('input.cmmtPosterCastLayout change.cmmtPosterCastLayout', '.cmmt-cast-name, .cmmt-cast-instruction, .cmmt-cast-image', syncRecommendedPosterLayout);
+
+  $('#cmmt-poster-layout').off('change.cmmtPosterLayout').on('change.cmmtPosterLayout', function(){
+    $(this).data('userSelected', true);
   });
 
   $(document).off('change.cmmtPosterCastRole', '.cmmt-cast-role').on('change.cmmtPosterCastRole', '.cmmt-cast-role', updateCastMemberHeadings);
