@@ -1,6 +1,7 @@
 #!/opt/cmsg-bgremove/bin/python
 
 import json
+import os
 import sys
 
 missing_dependencies = []
@@ -54,16 +55,16 @@ def cosine_similarity(a, b):
     return float(np.dot(a, b) / denom)
 
 
-def run_embedding_detector(image_path, threshold):
-    image = cv2.imread(image_path)
-    if image is None:
-        return {"ok": False, "error": "Could not read image"}
-
+def build_face_app():
     app = insightface.app.FaceAnalysis(
         name="buffalo_l",
         providers=["CPUExecutionProvider"],
     )
     app.prepare(ctx_id=-1, det_size=(640, 640))
+    return app
+
+
+def extract_face_records(app, image, max_faces=None):
     faces = app.get(image)
 
     face_records = []
@@ -78,7 +79,27 @@ def run_embedding_detector(image_path, threshold):
             "index": index,
             "bbox": normalize_bbox(getattr(face, "bbox", [0, 0, 0, 0])),
             "embedding": np.asarray(embedding, dtype=np.float32),
+            "area": float(max(0, face.bbox[2] - face.bbox[0]) * max(0, face.bbox[3] - face.bbox[1])) if hasattr(face, "bbox") else 0.0,
         })
+
+    face_records = sorted(face_records, key=lambda row: row["area"], reverse=True)
+    if max_faces is not None:
+        face_records = face_records[:max_faces]
+
+    for next_index, record in enumerate(face_records):
+        record["index"] = next_index
+
+    return face_records
+
+
+def run_embedding_detector(image_path, threshold, reference_paths=None):
+    reference_paths = reference_paths or []
+    image = cv2.imread(image_path)
+    if image is None:
+        return {"ok": False, "error": "Could not read image"}
+
+    app = build_face_app()
+    face_records = extract_face_records(app, image)
 
     duplicate_pairs = []
     pair_scores = []
@@ -96,7 +117,47 @@ def run_embedding_detector(image_path, threshold):
             if similarity >= threshold:
                 duplicate_pairs.append(pair)
 
-    likely_duplicate = bool(duplicate_pairs)
+    reference_pair_scores = []
+    repeated_reference_matches = []
+    for ref_index, reference_path in enumerate(reference_paths):
+        ref_image = cv2.imread(reference_path)
+        if ref_image is None:
+            continue
+
+        ref_faces = extract_face_records(app, ref_image, max_faces=1)
+        if not ref_faces:
+            continue
+
+        ref_face = ref_faces[0]
+        matches = []
+        for face in face_records:
+            similarity = cosine_similarity(ref_face["embedding"], face["embedding"])
+            score = {
+                "reference_index": ref_index,
+                "reference_file": os.path.basename(reference_path),
+                "face_index": face["index"],
+                "similarity": round(similarity, 4),
+                "reference_box": ref_face["bbox"],
+                "face_box": face["bbox"],
+            }
+            reference_pair_scores.append(score)
+            if similarity >= threshold:
+                matches.append(score)
+
+        if len(matches) > 1:
+            repeated_reference_matches.append({
+                "reference_index": ref_index,
+                "reference_file": os.path.basename(reference_path),
+                "matches": matches,
+            })
+
+    reasons = []
+    if duplicate_pairs:
+        reasons.append("similar_face_pairs")
+    if repeated_reference_matches:
+        reasons.append("reference_identity_repeated")
+
+    likely_duplicate = bool(duplicate_pairs) or bool(repeated_reference_matches)
     return {
         "ok": True,
         "method": "embedding",
@@ -104,10 +165,13 @@ def run_embedding_detector(image_path, threshold):
         "detected_face_count": len(face_records),
         "duplicate_pairs": duplicate_pairs[:20],
         "pair_scores": pair_scores[:100],
+        "reference_duplicate_pairs": repeated_reference_matches[:20],
+        "reference_pair_scores": reference_pair_scores[:200],
+        "reference_count": len(reference_paths),
         "threshold": threshold,
         "error": None,
         "likely_duplicate": likely_duplicate,
-        "reasons": ["similar_face_pairs"] if likely_duplicate else [],
+        "reasons": reasons,
         "warnings": [],
     }
 
@@ -236,7 +300,7 @@ def run_heuristic_detector(image_path, expected_cast_count, embedding_missing):
 
 def main():
     if len(sys.argv) < 3:
-        print(json.dumps({"ok": False, "error": "Usage: detect-duplicate-faces.py image expected_cast_count [similarity_threshold]"}))
+        print(json.dumps({"ok": False, "error": "Usage: detect-duplicate-faces.py image expected_cast_count [similarity_threshold] [reference_image ...]"}))
         return 2
 
     image_path = sys.argv[1]
@@ -251,6 +315,7 @@ def main():
         threshold = 0.62
 
     threshold = max(0.05, min(0.99, threshold))
+    reference_paths = sys.argv[4:] if len(sys.argv) > 4 else []
 
     embedding_missing = []
     if insightface is None:
@@ -260,7 +325,7 @@ def main():
 
     if cv2 is not None and np is not None and not embedding_missing:
         try:
-            print(json.dumps(run_embedding_detector(image_path, threshold)))
+            print(json.dumps(run_embedding_detector(image_path, threshold, reference_paths)))
             return 0
         except Exception as exc:
             fallback = run_heuristic_detector(image_path, expected_cast_count, ["embedding_runtime_error"])

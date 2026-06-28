@@ -661,8 +661,11 @@ private static function preview_duplicate_face_quality_check($clean_path, $brief
         . ' ' . escapeshellarg($script)
         . ' ' . escapeshellarg($clean_path)
         . ' ' . escapeshellarg((string)$cast_count)
-        . ' ' . escapeshellarg((string)$threshold)
-        . ' 2>&1';
+        . ' ' . escapeshellarg((string)$threshold);
+    foreach (self::cast_actor_assets($brief) as $reference_path) {
+        $cmd .= ' ' . escapeshellarg($reference_path);
+    }
+    $cmd .= ' 2>&1';
     $raw = shell_exec($cmd);
     $decoded = json_decode(trim((string)$raw), true);
 
@@ -712,6 +715,9 @@ private static function preview_duplicate_face_quality_check($clean_path, $brief
         'detected_face_count' => (int)($decoded['face_count'] ?? ($decoded['detected_face_count'] ?? 0)),
         'duplicate_pairs' => $decoded['duplicate_pairs'] ?? [],
         'pair_scores' => $decoded['pair_scores'] ?? [],
+        'reference_duplicate_pairs' => $decoded['reference_duplicate_pairs'] ?? [],
+        'reference_pair_scores' => $decoded['reference_pair_scores'] ?? [],
+        'reference_count' => (int)($decoded['reference_count'] ?? 0),
         'warnings' => $decoded['warnings'] ?? [],
         'embedding_missing_dependencies' => $decoded['embedding_missing_dependencies'] ?? [],
         'embedding_error' => sanitize_text_field($decoded['embedding_error'] ?? ''),
