@@ -4,6 +4,11 @@ if (!defined('ABSPATH')) { exit; }
 final class CMSG_Poster_AI {
     private static $in_final_generation = false;
     private static $final_openai_calls = 0;
+    private static $last_preview_quality_message = '';
+    private static $last_preview_quality_failures = [];
+    private static $enable_preview_quality_check = true;
+    private static $duplicate_face_similarity_threshold = 0.62;
+    private static $duplicate_face_detector_method = 'embedding_with_heuristic_fallback';
 
     private static function normalized_cast_members($brief) {
         $members = [];
@@ -316,6 +321,15 @@ final class CMSG_Poster_AI {
         $placement_mapping = self::placement_mapping_prompt($brief);
         $layout = self::poster_layout_key($brief);
         $layout_prompt = self::poster_layout_prompt($brief);
+        $quality_retry_prompt = '';
+        if (!empty($brief['quality_retry_attempt'])) {
+            $quality_retry_prompt = "QUALITY RETRY OVERRIDE\n"
+                . "A previous generated preview was rejected because it likely repeated uploaded cast identities.\n"
+                . "This retry must use the strictest anti-duplication behavior.\n"
+                . "Use Ensemble Portrait Grid with one clean, separate position per uploaded actor.\n"
+                . "Do not use floating-head repetition, bottom montage rows, repeated actor bodies, reflections, silhouettes, or background copies.\n"
+                . "Count the uploaded actors before composing, then render exactly that many uploaded actor identities total.\n";
+        }
         $ensemble_text = $cast_counts['total'] >= 6
             ? "Create an ensemble theatrical poster. Lead characters should be most prominent. Supporting characters should appear clearly but with secondary visual hierarchy. Avoid trying to make every actor equally large. Use a professional ensemble composition.\n"
             : '';
@@ -339,6 +353,8 @@ STYLE PRESET: {$style}
 {$identity_registry}
 
 {$layout_prompt}
+
+{$quality_retry_prompt}
 
 INDIVIDUAL ACTOR REGISTRY:
 " . ($cast_lines !== '' ? $cast_lines . "\n" : '') . "
@@ -386,6 +402,7 @@ STRICT BACKGROUND-ONLY RULES:
             . "TYPOGRAPHY RULE: Do NOT render the movie title, tagline, credits, or any readable text inside the artwork. The plugin  will overlay final typography after generation. Leave clean empty title-safe space.\n"
             . "\n{$identity_registry}\n"
             . "\n{$layout_prompt}\n"
+            . ($quality_retry_prompt !== '' ? "\n{$quality_retry_prompt}\n" : '')
             . "INDIVIDUAL ACTOR REGISTRY:\n"
             . ($cast_lines !== '' ? $cast_lines . "\n" : '')
             . "\n"
@@ -490,20 +507,61 @@ STRICT BACKGROUND-ONLY RULES:
         return trim((string) CMSG_Plugin::settings()['openai_api_key']) === '';
     }
 
+public static function last_preview_quality_message() {
+    return self::$last_preview_quality_message;
+}
+
+public static function last_preview_quality_failures() {
+    return self::$last_preview_quality_failures;
+}
+
 public static function generate_previews($brief, $draft_id) {
     $variants = ['hero', 'emotional', 'streaming'];
     $files = [];
+    self::$last_preview_quality_message = '';
+    self::$last_preview_quality_failures = [];
+    $quality_message = 'Large ensemble posters may require simplified layout. Try Ensemble Portrait Grid with fewer cast members or remove repeated supporting actors.';
 
     foreach ($variants as $index => $variant) {
+        $clean_path = '';
+        $quality_passed = false;
+        $last_quality_result = [];
+
+        for ($attempt = 0; $attempt <= 2; $attempt++) {
+            $attempt_brief = $brief;
+            if ($attempt > 0) {
+                $attempt_brief['quality_retry_attempt'] = $attempt;
+                $attempt_brief['quality_retry_reason'] = 'A previous preview candidate was rejected for likely duplicate uploaded cast identities.';
+                $attempt_brief['poster_layout'] = 'ensemble_portrait_grid';
+            }
+
         // 1) Generate CLEAN source without watermark
 try {
-    $clean_path = self::generate_image_file($brief, $draft_id, 'preview-clean', $variant, $index + 1, false);
+    $clean_path = self::generate_image_file($attempt_brief, $draft_id, 'preview-clean', $variant, $index + 1, false);
 } catch (Exception $e) {
     return new WP_Error('cmsg_openai_image_error', $e->getMessage());
 }
 
-        if ($clean_path && file_exists($clean_path)) {
+            if (!$clean_path || !file_exists($clean_path)) {
+                continue;
+            }
+
             self::resize_png_cover_no_overlay($clean_path, $clean_path, 900, 1285);
+            $quality = self::preview_duplicate_face_quality_check($clean_path, $attempt_brief, $variant, $attempt);
+            $last_quality_result = $quality;
+
+            if (!empty($quality['failed_quality_check'])) {
+                self::$last_preview_quality_failures[] = $quality;
+                self::reject_preview_candidate($clean_path);
+                error_log('CMSG POSTER PREVIEW QUALITY REJECTED: draft_id=' . intval($draft_id) . ' variant=' . sanitize_key($variant) . ' attempt=' . intval($attempt) . ' reason=' . wp_json_encode($quality));
+                continue;
+            }
+
+            $quality_passed = true;
+            break;
+        }
+
+        if ($quality_passed && $clean_path && file_exists($clean_path)) {
             self::generate_preview_format_family($clean_path, $brief);
 
             // Add title/tagline to clean source so finals match selected concept exactly
@@ -521,12 +579,143 @@ self::apply_watermark($display_path);
             // 3) Show watermarked copy to user, but keep matching clean source on disk
             $files[] = CMSG_Jobs::path_to_url($display_path);
 
+            } elseif (!empty($last_quality_result)) {
+                self::$last_preview_quality_message = $quality_message;
             }
         }
+        if (!empty($files) && !empty(self::$last_preview_quality_failures)) {
+            self::$last_preview_quality_message = $quality_message;
+        }
         if (empty($files)) {
+            if (!empty(self::$last_preview_quality_failures)) {
+                self::$last_preview_quality_message = $quality_message;
+                return new WP_Error('cmsg_poster_preview_quality_failed', $quality_message);
+            }
             return self::generate_svg_fallback_previews($brief, $draft_id);
         }
     return $files;
+}
+
+private static function reject_preview_candidate($clean_path) {
+    if (!is_string($clean_path) || $clean_path === '') return;
+
+    $failed_path = preg_replace('/\.png$/i', '-failed_quality_check.png', $clean_path);
+    if ($failed_path && file_exists($clean_path)) {
+        @rename($clean_path, $failed_path);
+        @chmod($failed_path, 0664);
+    }
+
+    foreach (['banner'] as $key) {
+        $family = self::preview_family_path($clean_path, $key);
+        if (file_exists($family)) @unlink($family);
+        $display = self::preview_family_display_path($clean_path, $key);
+        if (file_exists($display)) @unlink($display);
+    }
+
+    $display_path = str_replace('preview-clean', 'preview', $clean_path);
+    if (file_exists($display_path)) @unlink($display_path);
+}
+
+private static function preview_duplicate_face_quality_check($clean_path, $brief, $variant, $attempt) {
+    $cast_count = self::cast_counts($brief)['total'];
+    $layout = self::poster_layout_key($brief);
+
+    if (!self::$enable_preview_quality_check) {
+        return [
+            'failed_quality_check' => false,
+            'reason' => 'quality_check_disabled',
+            'variant' => sanitize_key($variant),
+            'attempt' => (int)$attempt,
+            'cast_count' => $cast_count,
+            'layout' => $layout,
+        ];
+    }
+
+    if ($cast_count < 2 || $layout === 'no_cast_background_only') {
+        return [
+            'failed_quality_check' => false,
+            'reason' => 'skipped_small_or_background_only',
+            'variant' => sanitize_key($variant),
+            'attempt' => (int)$attempt,
+            'cast_count' => $cast_count,
+            'layout' => $layout,
+        ];
+    }
+
+    $script = plugin_dir_path(dirname(__FILE__)) . 'tools/detect-duplicate-faces.py';
+    if (!file_exists($script)) {
+        error_log('CMSG POSTER PREVIEW QUALITY CHECK SKIPPED: missing script at ' . $script);
+        return [
+            'failed_quality_check' => false,
+            'reason' => 'quality_script_missing',
+            'variant' => sanitize_key($variant),
+            'attempt' => (int)$attempt,
+            'cast_count' => $cast_count,
+            'layout' => $layout,
+        ];
+    }
+
+    $python = file_exists('/opt/cmsg-bgremove/bin/python') ? '/opt/cmsg-bgremove/bin/python' : 'python3';
+    $threshold = (float) self::$duplicate_face_similarity_threshold;
+    $cmd = escapeshellcmd($python)
+        . ' ' . escapeshellarg($script)
+        . ' ' . escapeshellarg($clean_path)
+        . ' ' . escapeshellarg((string)$cast_count)
+        . ' ' . escapeshellarg((string)$threshold)
+        . ' 2>&1';
+    $raw = shell_exec($cmd);
+    $decoded = json_decode(trim((string)$raw), true);
+
+    if (is_array($decoded) && ($decoded['error'] ?? '') === 'missing_dependency') {
+        error_log('CMSG POSTER PREVIEW QUALITY CHECK DEPENDENCY MISSING: missing=' . wp_json_encode($decoded['missing'] ?? []));
+        return [
+            'failed_quality_check' => false,
+            'reason' => 'quality_check_missing_dependency',
+            'variant' => sanitize_key($variant),
+            'attempt' => (int)$attempt,
+            'cast_count' => $cast_count,
+            'layout' => $layout,
+            'detector_method' => self::$duplicate_face_detector_method,
+            'threshold' => $threshold,
+            'missing_dependency' => $decoded['missing'] ?? [],
+        ];
+    }
+
+    if (!is_array($decoded) || empty($decoded['ok'])) {
+        error_log('CMSG POSTER PREVIEW QUALITY CHECK INVALID RESULT: cmd=' . $cmd . ' raw=' . print_r($raw, true));
+        return [
+            'failed_quality_check' => false,
+            'reason' => 'quality_check_invalid_result',
+            'variant' => sanitize_key($variant),
+            'attempt' => (int)$attempt,
+            'cast_count' => $cast_count,
+            'layout' => $layout,
+            'detector_method' => self::$duplicate_face_detector_method,
+            'threshold' => $threshold,
+        ];
+    }
+
+    if (($decoded['method'] ?? '') === 'heuristic' && !empty($decoded['embedding_missing_dependencies'])) {
+        error_log('CMSG POSTER PREVIEW QUALITY CHECK EMBEDDING FALLBACK: missing=' . wp_json_encode($decoded['embedding_missing_dependencies']));
+    }
+
+    return [
+        'failed_quality_check' => !empty($decoded['likely_duplicate']),
+        'reason' => implode(',', $decoded['reasons'] ?? []),
+        'variant' => sanitize_key($variant),
+        'attempt' => (int)$attempt,
+        'cast_count' => $cast_count,
+        'layout' => $layout,
+        'detector_method' => sanitize_key($decoded['method'] ?? self::$duplicate_face_detector_method),
+        'configured_detector_method' => self::$duplicate_face_detector_method,
+        'threshold' => isset($decoded['threshold']) ? (float)$decoded['threshold'] : $threshold,
+        'detected_face_count' => (int)($decoded['face_count'] ?? ($decoded['detected_face_count'] ?? 0)),
+        'duplicate_pairs' => $decoded['duplicate_pairs'] ?? [],
+        'pair_scores' => $decoded['pair_scores'] ?? [],
+        'warnings' => $decoded['warnings'] ?? [],
+        'embedding_missing_dependencies' => $decoded['embedding_missing_dependencies'] ?? [],
+        'embedding_error' => sanitize_text_field($decoded['embedding_error'] ?? ''),
+    ];
 }
 
 private static function generate_preview_format_family($clean_path, $brief) {
