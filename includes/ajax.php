@@ -735,6 +735,22 @@ CMSG_Drafts::update_draft($draft->id, [
         return 'floating_heads_ensemble';
     }
 
+    private static function poster_generation_mode($cast_members = [], $meta = []) {
+        $mode = sanitize_key(wp_unslash($_POST['poster_generation_mode'] ?? ($meta['poster_generation_mode'] ?? 'auto')));
+        $allowed = ['auto', 'single_pass', 'identity_composite'];
+
+        if (!in_array($mode, $allowed, true)) {
+            $mode = 'auto';
+        }
+
+        if ($mode === 'auto') {
+            $count = is_array($cast_members) ? count($cast_members) : 0;
+            return $count >= 4 ? 'identity_composite' : 'single_pass';
+        }
+
+        return $mode;
+    }
+
     private static function url_to_upload_path($url) {
         $uploads = wp_upload_dir();
         if (strpos($url, $uploads['baseurl']) === 0) {
@@ -756,6 +772,7 @@ CMSG_Drafts::update_draft($draft->id, [
         $poster_scene_direction = self::poster_scene_direction();
         $cast_members = self::posted_cast_members($uploads);
         $poster_layout = self::poster_layout($cast_members);
+        $poster_generation_mode = self::poster_generation_mode($cast_members);
         $payload = [
             'request_email' => sanitize_email(wp_unslash($_POST['request_email'] ?? '')),
             'title' => sanitize_text_field(wp_unslash($_POST['title'] ?? '')),
@@ -768,12 +785,14 @@ CMSG_Drafts::update_draft($draft->id, [
             'mood' => sanitize_text_field(wp_unslash($_POST['mood'] ?? '')),
             'style_preset' => sanitize_text_field(wp_unslash($_POST['style_preset'] ?? '')),
             'poster_layout' => $poster_layout,
+            'poster_generation_mode' => $poster_generation_mode,
             'poster_description' => $poster_scene_direction,
 
             'source_reference' => wp_json_encode([
             'style_reference' => $uploads['style_reference'],
             'poster_assets' => $uploads['poster_assets'],
             'poster_layout' => $poster_layout,
+            'poster_generation_mode' => $poster_generation_mode,
             'poster_description' => $poster_scene_direction,
             'cast_members' => $cast_members,
 
@@ -809,6 +828,7 @@ CMSG_Drafts::update_draft($draft->id, [
         $poster_scene_direction = self::poster_scene_direction($meta);
         $cast_members = self::posted_cast_members([], $meta);
         $poster_layout = self::poster_layout($cast_members, $meta);
+        $poster_generation_mode = self::poster_generation_mode($cast_members, $meta);
 
         $brief = [
             'title' => sanitize_text_field(wp_unslash($_POST['title'] ?? '')),
@@ -821,6 +841,7 @@ CMSG_Drafts::update_draft($draft->id, [
             'mood' => sanitize_text_field(wp_unslash($_POST['mood'] ?? '')),
             'style_preset' => sanitize_text_field(wp_unslash($_POST['style_preset'] ?? '')),
             'poster_layout' => $poster_layout,
+            'poster_generation_mode' => $poster_generation_mode,
             'poster_description' => $poster_scene_direction,
             'cast_members' => $cast_members,
 
@@ -892,6 +913,7 @@ if (is_wp_error($previews)) {
         $poster_scene_direction = self::poster_scene_direction($meta);
         $cast_members = self::posted_cast_members([], $meta);
         $poster_layout = self::poster_layout($cast_members, $meta);
+        $poster_generation_mode = self::poster_generation_mode($cast_members, $meta);
 
         error_log('CMSG POSTER FINALIZE AJAX TRACE: selected_preview_url=' . $selected_preview_url);
         error_log('CMSG POSTER FINALIZE AJAX TRACE: selected_preview_path=' . $selected_preview_path);
@@ -907,6 +929,7 @@ if (is_wp_error($previews)) {
             'mood' => sanitize_text_field(wp_unslash($_POST['mood'] ?? '')),
             'style_preset' => sanitize_text_field(wp_unslash($_POST['style_preset'] ?? '')),
             'poster_layout' => $poster_layout,
+            'poster_generation_mode' => $poster_generation_mode,
             'selected_concept' => (int)($_POST['selected_concept'] ?? 0),
             'selected_preview_path' => $selected_preview_path,
             'poster_description' => $poster_scene_direction,

@@ -48,6 +48,14 @@
           </select>
           <small>For large casts, Ensemble Portrait Grid is recommended to reduce duplicate faces.</small>
         </label>
+        <label><span>Generation mode</span>
+          <select name="poster_generation_mode" id="cmmt-poster-generation-mode">
+            <option value="auto" selected>Auto Recommended</option>
+            <option value="single_pass">Single Pass AI Poster (Legacy)</option>
+            <option value="identity_composite">Identity-Controlled Composite</option>
+          </select>
+          <small>Auto uses Identity-Controlled Composite for ensemble casts with 4 or more uploaded actors.</small>
+        </label>
         <label><span>Title font style</span>
           <select name="title_font_style">
             <option value="cinematic_bold">Cinematic Bold</option>

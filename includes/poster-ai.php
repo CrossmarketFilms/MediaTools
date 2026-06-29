@@ -537,7 +537,7 @@ public static function generate_previews($brief, $draft_id) {
 
         // 1) Generate CLEAN source without watermark
 try {
-    $clean_path = self::generate_image_file($attempt_brief, $draft_id, 'preview-clean', $variant, $index + 1, false);
+    $clean_path = self::generate_preview_candidate_file($attempt_brief, $draft_id, $variant, $index + 1);
 } catch (Exception $e) {
     return new WP_Error('cmsg_openai_image_error', $e->getMessage());
 }
@@ -737,7 +737,11 @@ private static function generate_preview_format_family($clean_path, $brief) {
             continue;
         }
 
-        self::generate_native_preview_family_source($clean_path, $family_path, $brief, $key, $cfg['size']);
+        if (self::should_use_identity_composite($brief)) {
+            self::generate_identity_composite_family_source($brief, $family_path, $key, $cfg['size']);
+        } else {
+            self::generate_native_preview_family_source($clean_path, $family_path, $brief, $key, $cfg['size']);
+        }
 
         if (file_exists($family_path) && filesize($family_path) > 0) {
             $display_path = self::preview_family_display_path($clean_path, $key);
@@ -755,6 +759,68 @@ private static function preview_family_path($clean_path, $key) {
 
 private static function preview_family_display_path($clean_path, $key) {
     return str_replace('preview-clean', 'preview', self::preview_family_path($clean_path, $key));
+}
+
+private static function generate_identity_composite_family_source($brief, $out, $key, $openai_size) {
+    $cast_assets = self::cast_actor_assets($brief);
+    if (empty($cast_assets)) {
+        return false;
+    }
+
+    $background_brief = self::background_only_brief($brief);
+    if (!self::generate_background_only_file($background_brief, $out, $key, $openai_size)) {
+        error_log('CMSG POSTER IDENTITY COMPOSITE FAMILY ERROR: background_failed key=' . sanitize_key($key) . ' out=' . $out);
+        return false;
+    }
+
+    if ($key === 'banner') {
+        self::resize_png_cover_no_overlay($out, $out, 895, 504);
+    } elseif ($key === 'vertical') {
+        self::resize_png_cover_no_overlay($out, $out, 900, 1285);
+    }
+
+    $ok = self::composite_actor_assets($out, $cast_assets, $key, $brief);
+    if (!$ok) {
+        error_log('CMSG POSTER IDENTITY COMPOSITE FAMILY ERROR: actor_composite_failed key=' . sanitize_key($key) . ' out=' . $out);
+        return false;
+    }
+
+    @chmod($out, 0664);
+    return file_exists($out) && filesize($out) > 0;
+}
+
+private static function generate_background_only_file($brief, $out, $variant, $openai_size) {
+    $api_key = trim((string) CMSG_Plugin::settings()['openai_api_key']);
+    if (!$api_key) {
+        error_log('CMSG POSTER IDENTITY COMPOSITE ERROR: OpenAI API key is missing for background generation.');
+        return false;
+    }
+
+    $prompt = self::build_prompt($brief, $variant);
+    $response = self::call_image_generation($api_key, $prompt, $openai_size);
+    if (is_wp_error($response)) {
+        error_log('CMSG POSTER IDENTITY COMPOSITE BACKGROUND ERROR: ' . $response->get_error_message());
+        return false;
+    }
+
+    $code = wp_remote_retrieve_response_code($response);
+    $body = wp_remote_retrieve_body($response);
+    $data = json_decode($body, true);
+
+    if ($code < 200 || $code >= 300 || empty($data['data'][0]['b64_json'])) {
+        error_log('CMSG POSTER IDENTITY COMPOSITE BACKGROUND ERROR CODE: ' . $code . ' BODY: ' . $body);
+        return false;
+    }
+
+    $image_data = base64_decode($data['data'][0]['b64_json']);
+    if (!$image_data) {
+        return false;
+    }
+
+    file_put_contents($out, $image_data);
+    @chmod($out, 0664);
+
+    return file_exists($out) && filesize($out) > 0;
 }
 
 private static function generate_native_preview_family_source($selected_preview_path, $out, $brief, $key, $openai_size) {
@@ -958,6 +1024,79 @@ private static function resolve_selected_preview_source($selected_preview_path) 
     }
 
     return '';
+}
+
+private static function poster_generation_mode($brief) {
+    $mode = sanitize_key($brief['poster_generation_mode'] ?? 'auto');
+    if (!in_array($mode, ['auto', 'single_pass', 'identity_composite'], true)) {
+        $mode = 'auto';
+    }
+
+    if ($mode === 'auto') {
+        return self::cast_counts($brief)['total'] >= 4 ? 'identity_composite' : 'single_pass';
+    }
+
+    return $mode;
+}
+
+private static function should_use_identity_composite($brief) {
+    return self::poster_generation_mode($brief) === 'identity_composite'
+        && self::poster_layout_key($brief) !== 'no_cast_background_only'
+        && count(self::cast_actor_assets($brief)) > 0;
+}
+
+private static function generate_preview_candidate_file($brief, $draft_id, $variant, $index) {
+    if (self::should_use_identity_composite($brief)) {
+        $composite_path = self::generate_identity_composite_preview_file($brief, $draft_id, $variant, $index);
+        if ($composite_path && file_exists($composite_path)) {
+            return $composite_path;
+        }
+
+        error_log('CMSG POSTER IDENTITY COMPOSITE FALLBACK: identity_composite_failed draft_id=' . intval($draft_id) . ' variant=' . sanitize_key($variant));
+    }
+
+    return self::generate_image_file($brief, $draft_id, 'preview-clean', $variant, $index, false);
+}
+
+private static function background_only_brief($brief) {
+    $background = $brief;
+    $background['background_only'] = true;
+    $background['poster_generation_mode'] = 'single_pass';
+    $background['poster_layout'] = 'no_cast_background_only';
+    $background['cast_members'] = [];
+    $background['cast_actor_1'] = '';
+    $background['cast_actor_2'] = '';
+    $background['cast_actor_3'] = '';
+    $background['cast_actor_1_instruction'] = '';
+    $background['cast_actor_2_instruction'] = '';
+    $background['cast_actor_3_instruction'] = '';
+
+    return $background;
+}
+
+private static function generate_identity_composite_preview_file($brief, $draft_id, $variant, $index) {
+    $cast_assets = self::cast_actor_assets($brief);
+    if (empty($cast_assets)) {
+        return '';
+    }
+
+    $background_brief = self::background_only_brief($brief);
+    $background_path = self::generate_image_file($background_brief, $draft_id, 'preview-clean', $variant, $index, false);
+    if (!$background_path || !file_exists($background_path)) {
+        error_log('CMSG POSTER IDENTITY COMPOSITE ERROR: background_generation_failed draft_id=' . intval($draft_id));
+        return '';
+    }
+
+    self::resize_png_cover_no_overlay($background_path, $background_path, 900, 1285);
+
+    error_log('CMSG POSTER IDENTITY COMPOSITE START: path=' . $background_path . ' actors=' . count($cast_assets) . ' variant=' . sanitize_key($variant));
+    $ok = self::composite_actor_assets($background_path, $cast_assets, $variant, $brief);
+    if (!$ok || !file_exists($background_path) || filesize($background_path) <= 0) {
+        error_log('CMSG POSTER IDENTITY COMPOSITE ERROR: actor_composite_failed path=' . $background_path);
+        return '';
+    }
+
+    return $background_path;
 }
 
 private static function generate_image_file($brief, $id, $prefix, $variant, $index, $watermark) {
@@ -1216,152 +1355,25 @@ private static function composite_actor_assets($background_path, $assets, $varia
         return false;
     }
 
-    if (!extension_loaded('imagick')) {
-        error_log('CMSG POSTER COMPOSITE: Imagick extension not loaded. Using GD portrait fallback.');
-        return self::gd_composite_actor_assets($background_path, $assets, $variant, null, 0, $brief);
-    }
-
     try {
-        $canvas = new Imagick($background_path);
-        $canvas_w = $canvas->getImageWidth();
-        $canvas_h = $canvas->getImageHeight();
-
         $valid_assets = [];
-error_log('CMSG POSTER COMPOSITE START: raw_assets=' . count($assets));
-     foreach ($assets as $asset) {
-            if (!is_string($asset) || !file_exists($asset)) continue;
-            $valid_assets[] = $asset;
+        foreach ($assets as $asset) {
+            if (is_string($asset) && file_exists($asset)) {
+                $valid_assets[] = $asset;
+            }
         }
-error_log('CMSG POSTER COMPOSITE VALID: valid_assets=' . count($valid_assets));
 
         if (empty($valid_assets)) {
+            error_log('CMSG POSTER IDENTITY COMPOSITE ERROR: no_valid_actor_assets path=' . $background_path);
             return false;
         }
 
-        $count = count($valid_assets);
-        $layout_slots = self::actor_layout_slots($brief, $count, $variant);
-        $max_actor_h = (int) round($canvas_h * 0.62);
+        $slots = self::actor_layout_slots($brief, count($valid_assets), $variant);
+        error_log('CMSG POSTER IDENTITY COMPOSITE MAP: path=' . $background_path . ' variant=' . sanitize_key($variant) . ' actors=' . wp_json_encode($valid_assets) . ' slots=' . wp_json_encode($slots));
 
-        foreach ($valid_assets as $i => $asset_path) {
-$cutout_path = self::remove_actor_background($asset_path);
-error_log('CMSG POSTER CUTOUT PATH: ' . $cutout_path);
-
-if (!$cutout_path || !file_exists($cutout_path)) {
-    error_log('CMSG POSTER COMPOSITE: background removal failed for ' . $asset_path);
-    self::gd_composite_actor_assets($background_path, [$asset_path], $variant, $count, $i, $brief);
-    continue;
-}
-
-$actor = new Imagick($cutout_path);
-            $actor->setImageFormat('png');
-
-            /*
-             * MVP crop/trim:
-             * This does not fully remove complex backgrounds yet,
-             * but trims simple borders and prepares the actor layer.
-             */
-            $actor->trimImage(8);
-            $actor->setImagePage(0, 0, 0, 0);
-
-            $actor_w = $actor->getImageWidth();
-            $actor_h = $actor->getImageHeight();
-
-            if ($actor_w <= 0 || $actor_h <= 0) {
-                $actor->clear();
-                continue;
-            }
-
-            $scale = $max_actor_h / $actor_h;
-
-            if ($count === 1) {
-                $scale = $canvas_h * 0.70 / $actor_h;
-            } elseif ($count === 2) {
-                $scale = $canvas_h * 0.58 / $actor_h;
-            } elseif ($count >= 3) {
-                $scale = $canvas_h * 0.48 / $actor_h;
-            }
-
-            $new_w = max(1, (int) round($actor_w * $scale));
-            $new_h = max(1, (int) round($actor_h * $scale));
-
-            $actor->resizeImage($new_w, $new_h, Imagick::FILTER_LANCZOS, 1);
-
-/*
- * Cinematic placement + blending for real actor cutouts.
- * Keep actors above title-safe area and blend them into the poster.
- */
-
-$title_safe_y = (int) round($canvas_h * 0.66);
-$slot = $layout_slots[$i] ?? ['x' => 0.50, 'h' => 0.50, 'bottom' => 0.70];
-$actor_bottom = min($title_safe_y, (int) round($canvas_h * (float)$slot['bottom']));
-$target_h = (int) round($canvas_h * (float)$slot['h']);
-$x_ratio = (float)$slot['x'];
-
-$scale = $target_h / $actor_h;
-$new_w = max(1, (int) round($actor_w * $scale));
-$new_h = max(1, (int) round($actor_h * $scale));
-
-$actor->resizeImage($new_w, $new_h, Imagick::FILTER_LANCZOS, 1);
-
-// Match actor cutouts to warm cinematic poster tone
-$actor->modulateImage(88, 105, 96);
-$actor->brightnessContrastImage(-8, 14);
-
-$x = (int) round(($canvas_w * $x_ratio) - ($new_w / 2));
-$y = (int) round($actor_bottom - $new_h);
-
-if ($variant === 'banner') {
-    $y = (int) round($canvas_h * 0.12);
-}
-
-$x = max(0, min($x, $canvas_w - $new_w));
-$y = max(0, min($y, $canvas_h - $new_h));
-
-// Soft shadow behind actor
-$shadow = clone $actor;
-$shadow->setImageBackgroundColor(new ImagickPixel('black'));
-$shadow->shadowImage(65, 12, 12, 18);
-$canvas->compositeImage($shadow, Imagick::COMPOSITE_OVER, $x + 12, $y + 18);
-$shadow->clear();
-$shadow->destroy();
-
-// Composite real actor pixels
-$canvas->compositeImage($actor, Imagick::COMPOSITE_OVER, $x, $y);
-
-// subtle shadow only
-
-$shadow = clone $actor;
-
-$shadow->shadowImage(
-    40,
-    6,
-    4,
-    8
-);
-
-$canvas->compositeImage(
-    $shadow,
-    Imagick::COMPOSITE_OVER,
-    $x + 4,
-    $y + 8
-);
-
-$shadow->clear();
-$shadow->destroy();
-
-error_log('CMSG POSTER COMPOSITED ACTOR: asset=' . $asset_path . ' x=' . $x . ' y=' . $y . ' w=' . $new_w . ' h=' . $new_h);
-            $actor->clear();
-            $actor->destroy();
-        }
-
-        $canvas->setImageFormat('png');
-        $canvas->writeImage($background_path);
-        $canvas->clear();
-        $canvas->destroy();
-
-        return true;
+        return self::gd_composite_actor_assets($background_path, $valid_assets, $variant, null, 0, $brief);
     } catch (Throwable $e) {
-        error_log('CMSG POSTER COMPOSITE ERROR: ' . $e->getMessage());
+        error_log('CMSG POSTER IDENTITY COMPOSITE ERROR: ' . $e->getMessage());
         return false;
     }
 }
@@ -1438,6 +1450,15 @@ private static function gd_composite_actor_assets($background_path, $assets, $va
             (int)round($target_h * 0.24),
             $shadow
         );
+        $glow = imagecolorallocatealpha($canvas, 255, 232, 180, 105);
+        imagefilledellipse(
+            $canvas,
+            (int)round($x + ($target_w / 2)),
+            (int)round($y + ($target_h * 0.48)),
+            (int)round($target_w * 1.04),
+            (int)round($target_h * 0.94),
+            $glow
+        );
 
         self::gd_copy_soft_portrait($canvas, $actor, $x, $y, $target_w, $target_h, $actor_w, $actor_h);
         imagedestroy($actor);
@@ -1461,7 +1482,28 @@ private static function gd_copy_soft_portrait($canvas, $actor, $x, $y, $target_w
     imagesavealpha($layer, true);
     $transparent = imagecolorallocatealpha($layer, 0, 0, 0, 127);
     imagefilledrectangle($layer, 0, 0, $target_w, $target_h, $transparent);
-    imagecopyresampled($layer, $actor, 0, 0, 0, 0, $target_w, $target_h, $actor_w, $actor_h);
+
+    $target_ratio = $target_w / max(1, $target_h);
+    $source_ratio = $actor_w / max(1, $actor_h);
+    $src_x = 0;
+    $src_y = 0;
+    $src_w = $actor_w;
+    $src_h = $actor_h;
+
+    if ($source_ratio > $target_ratio) {
+        $src_w = (int)round($actor_h * $target_ratio);
+        $src_x = (int)round(($actor_w - $src_w) / 2);
+    } else {
+        $src_h = (int)round($actor_w / $target_ratio);
+        $src_y = (int)round(($actor_h - $src_h) * 0.16);
+    }
+
+    $src_w = max(1, min($src_w, $actor_w));
+    $src_h = max(1, min($src_h, $actor_h));
+    $src_x = max(0, min($src_x, $actor_w - $src_w));
+    $src_y = max(0, min($src_y, $actor_h - $src_h));
+
+    imagecopyresampled($layer, $actor, 0, 0, $src_x, $src_y, $target_w, $target_h, $src_w, $src_h);
 
     for ($py = 0; $py < $target_h; $py++) {
         $ny = ($py / max(1, $target_h)) - 0.46;
