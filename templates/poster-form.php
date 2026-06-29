@@ -54,7 +54,7 @@
             <option value="single_pass">Single Pass AI Poster</option>
             <option value="identity_composite">Identity-Controlled Composite</option>
           </select>
-          <small>Single Pass creates the most cinematic AI-integrated poster. Identity-Controlled Composite is recommended for larger casts where each uploaded actor must appear exactly once.</small>
+          <small>Single Pass AI Poster: Best for cinematic AI-integrated poster concepts. Recommended for smaller casts. Identity-Controlled Composite (Beta / Advanced): Best for ensemble casts where every uploaded actor must appear exactly once. Uses layered cutouts and deterministic placement.</small>
         </label>
         <label><span>Title font style</span>
           <select name="title_font_style">
