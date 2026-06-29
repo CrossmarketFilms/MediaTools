@@ -562,7 +562,11 @@ try {
         }
 
         if ($quality_passed && $clean_path && file_exists($clean_path)) {
-            self::generate_preview_format_family($clean_path, $brief);
+            if (!self::generate_preview_format_family($clean_path, $brief)) {
+                self::reject_preview_candidate($clean_path);
+                error_log('CMSG POSTER PREVIEW REJECTED: preview_family_generation_failed draft_id=' . intval($draft_id) . ' path=' . $clean_path);
+                continue;
+            }
 
             // Add title/tagline to clean source so finals match selected concept exactly
             // self::overlay_title_and_tagline($clean_path, $brief, 0, 0);
@@ -725,7 +729,7 @@ private static function preview_duplicate_face_quality_check($clean_path, $brief
 }
 
 private static function generate_preview_format_family($clean_path, $brief) {
-    if (empty($clean_path) || !file_exists($clean_path)) return;
+    if (empty($clean_path) || !file_exists($clean_path)) return false;
 
     $family = [
         'banner' => ['size' => '1536x1024'],
@@ -738,7 +742,9 @@ private static function generate_preview_format_family($clean_path, $brief) {
         }
 
         if (self::should_use_identity_composite($brief)) {
-            self::generate_identity_composite_family_source($brief, $family_path, $key, $cfg['size']);
+            if (!self::generate_identity_composite_family_source($brief, $family_path, $key, $cfg['size'])) {
+                return false;
+            }
         } else {
             self::generate_native_preview_family_source($clean_path, $family_path, $brief, $key, $cfg['size']);
         }
@@ -751,6 +757,8 @@ private static function generate_preview_format_family($clean_path, $brief) {
             @chmod($display_path, 0664);
         }
     }
+
+    return true;
 }
 
 private static function preview_family_path($clean_path, $key) {
@@ -779,9 +787,9 @@ private static function generate_identity_composite_family_source($brief, $out, 
         self::resize_png_cover_no_overlay($out, $out, 900, 1285);
     }
 
-    $ok = self::composite_actor_assets($out, $cast_assets, $key, $brief);
-    if (!$ok) {
-        error_log('CMSG POSTER IDENTITY COMPOSITE FAMILY ERROR: actor_composite_failed key=' . sanitize_key($key) . ' out=' . $out);
+    $placed = self::composite_actor_assets($out, $cast_assets, $key, $brief);
+    if ((int)$placed !== count($cast_assets)) {
+        error_log('CMSG POSTER IDENTITY COMPOSITE FAMILY ERROR: actor_composite_failed key=' . sanitize_key($key) . ' out=' . $out . ' expected=' . count($cast_assets) . ' placed=' . intval($placed));
         return false;
     }
 
@@ -796,7 +804,7 @@ private static function generate_background_only_file($brief, $out, $variant, $o
         return false;
     }
 
-    $prompt = self::build_prompt($brief, $variant);
+    $prompt = self::build_background_only_prompt($brief, $variant);
     $response = self::call_image_generation($api_key, $prompt, $openai_size);
     if (is_wp_error($response)) {
         error_log('CMSG POSTER IDENTITY COMPOSITE BACKGROUND ERROR: ' . $response->get_error_message());
@@ -821,6 +829,32 @@ private static function generate_background_only_file($brief, $out, $variant, $o
     @chmod($out, 0664);
 
     return file_exists($out) && filesize($out) > 0;
+}
+
+private static function build_background_only_prompt($brief, $variant = '') {
+    $title = sanitize_text_field($brief['title'] ?? ($brief['movie_title'] ?? 'Untitled Film'));
+    $genre = sanitize_text_field($brief['genre'] ?? '');
+    $mood = sanitize_text_field($brief['mood'] ?? '');
+    $style = sanitize_text_field($brief['style_preset'] ?? '');
+    $scene = sanitize_textarea_field($brief['poster_description'] ?? '');
+    $variant_label = sanitize_text_field($variant ?: 'vertical');
+
+    $prompt = "Create a cinematic movie poster BACKGROUND PLATE ONLY.\n\n";
+    $prompt .= "PROJECT: {$title}\n";
+    if ($genre !== '') $prompt .= "GENRE: {$genre}\n";
+    if ($mood !== '') $prompt .= "MOOD: {$mood}\n";
+    if ($style !== '') $prompt .= "STYLE PRESET: {$style}\n";
+    $prompt .= "FORMAT: {$variant_label}\n\n";
+    $prompt .= "BACKGROUND SCENE DIRECTION:\n";
+    $prompt .= ($scene !== '' ? $scene : 'Create a polished cinematic environment with dramatic lighting and title-safe lower space.') . "\n\n";
+    $prompt .= "STRICT BACKGROUND-ONLY RULES:\n";
+    $prompt .= "- Do not create people, actors, faces, bodies, silhouettes, crowds, reflections of people, portraits, statues, masks, mannequins, ghosts, or human-like figures.\n";
+    $prompt .= "- Do not render the movie title, tagline, credits, logos, captions, signs, readable text, or typography.\n";
+    $prompt .= "- Leave clean visual space for actor layers and final title typography that will be composited later by the plugin.\n";
+    $prompt .= "- The result must be a people-free cinematic background plate only.\n";
+    $prompt .= "- Use atmospheric lighting, depth, props, vehicles, buildings, symbols, and environment elements only.\n";
+
+    return $prompt;
 }
 
 private static function generate_native_preview_family_source($selected_preview_path, $out, $brief, $key, $openai_size) {
@@ -1052,7 +1086,8 @@ private static function generate_preview_candidate_file($brief, $draft_id, $vari
             return $composite_path;
         }
 
-        error_log('CMSG POSTER IDENTITY COMPOSITE FALLBACK: identity_composite_failed draft_id=' . intval($draft_id) . ' variant=' . sanitize_key($variant));
+        error_log('CMSG POSTER IDENTITY COMPOSITE FAILED CLOSED: identity_composite_failed draft_id=' . intval($draft_id) . ' variant=' . sanitize_key($variant));
+        return '';
     }
 
     return self::generate_image_file($brief, $draft_id, 'preview-clean', $variant, $index, false);
@@ -1081,8 +1116,8 @@ private static function generate_identity_composite_preview_file($brief, $draft_
     }
 
     $background_brief = self::background_only_brief($brief);
-    $background_path = self::generate_image_file($background_brief, $draft_id, 'preview-clean', $variant, $index, false);
-    if (!$background_path || !file_exists($background_path)) {
+    $background_path = self::preview_clean_file_path($draft_id, $variant, $index);
+    if (!self::generate_background_only_file($background_brief, $background_path, $variant, '1024x1536')) {
         error_log('CMSG POSTER IDENTITY COMPOSITE ERROR: background_generation_failed draft_id=' . intval($draft_id));
         return '';
     }
@@ -1090,13 +1125,22 @@ private static function generate_identity_composite_preview_file($brief, $draft_
     self::resize_png_cover_no_overlay($background_path, $background_path, 900, 1285);
 
     error_log('CMSG POSTER IDENTITY COMPOSITE START: path=' . $background_path . ' actors=' . count($cast_assets) . ' variant=' . sanitize_key($variant));
-    $ok = self::composite_actor_assets($background_path, $cast_assets, $variant, $brief);
-    if (!$ok || !file_exists($background_path) || filesize($background_path) <= 0) {
-        error_log('CMSG POSTER IDENTITY COMPOSITE ERROR: actor_composite_failed path=' . $background_path);
+    $placed = self::composite_actor_assets($background_path, $cast_assets, $variant, $brief);
+    if ((int)$placed !== count($cast_assets) || !file_exists($background_path) || filesize($background_path) <= 0) {
+        error_log('CMSG POSTER IDENTITY COMPOSITE ERROR: actor_composite_failed path=' . $background_path . ' expected=' . count($cast_assets) . ' placed=' . intval($placed));
         return '';
     }
 
     return $background_path;
+}
+
+private static function preview_clean_file_path($draft_id, $variant, $index) {
+    $uploads = wp_upload_dir();
+    $dir = trailingslashit($uploads['basedir']) . 'poster-previews';
+    if (!is_dir($dir)) wp_mkdir_p($dir);
+
+    $filename = sanitize_file_name('poster-ai-preview-clean-' . intval($draft_id) . '-' . sanitize_key($variant) . '-' . intval($index) . '.png');
+    return trailingslashit($dir) . $filename;
 }
 
 private static function generate_image_file($brief, $id, $prefix, $variant, $index, $watermark) {
@@ -1274,16 +1318,16 @@ private static function actor_layout_slots($brief, $count, $variant = '') {
 
     if ($variant === 'banner') {
         $slots = [
-            ['x' => 0.30, 'h' => 0.64, 'bottom' => 0.88],
-            ['x' => 0.70, 'h' => 0.64, 'bottom' => 0.88],
-            ['x' => 0.44, 'h' => 0.56, 'bottom' => 0.88],
-            ['x' => 0.18, 'h' => 0.48, 'bottom' => 0.88],
-            ['x' => 0.82, 'h' => 0.48, 'bottom' => 0.88],
-            ['x' => 0.55, 'h' => 0.44, 'bottom' => 0.86],
-            ['x' => 0.08, 'h' => 0.40, 'bottom' => 0.88],
-            ['x' => 0.92, 'h' => 0.40, 'bottom' => 0.88],
-            ['x' => 0.38, 'h' => 0.40, 'bottom' => 0.86],
-            ['x' => 0.62, 'h' => 0.40, 'bottom' => 0.86],
+            ['x' => 0.16, 'h' => 0.78, 'bottom' => 0.94],
+            ['x' => 0.32, 'h' => 0.82, 'bottom' => 0.94],
+            ['x' => 0.50, 'h' => 0.88, 'bottom' => 0.95],
+            ['x' => 0.68, 'h' => 0.82, 'bottom' => 0.94],
+            ['x' => 0.84, 'h' => 0.78, 'bottom' => 0.94],
+            ['x' => 0.08, 'h' => 0.68, 'bottom' => 0.93],
+            ['x' => 0.92, 'h' => 0.68, 'bottom' => 0.93],
+            ['x' => 0.40, 'h' => 0.72, 'bottom' => 0.92],
+            ['x' => 0.60, 'h' => 0.72, 'bottom' => 0.92],
+            ['x' => 0.24, 'h' => 0.66, 'bottom' => 0.92],
         ];
     } elseif ($count === 1) {
         $slots = [
@@ -1296,17 +1340,23 @@ private static function actor_layout_slots($brief, $count, $variant = '') {
         ];
     } else {
         $slots = [
-            ['x' => 0.26, 'h' => 0.52, 'bottom' => 0.70],
-            ['x' => 0.74, 'h' => 0.52, 'bottom' => 0.70],
-            ['x' => 0.42, 'h' => 0.48, 'bottom' => 0.66],
-            ['x' => 0.58, 'h' => 0.44, 'bottom' => 0.66],
-            ['x' => 0.18, 'h' => 0.40, 'bottom' => 0.62],
-            ['x' => 0.82, 'h' => 0.40, 'bottom' => 0.62],
-            ['x' => 0.32, 'h' => 0.36, 'bottom' => 0.58],
-            ['x' => 0.68, 'h' => 0.36, 'bottom' => 0.58],
-            ['x' => 0.12, 'h' => 0.34, 'bottom' => 0.56],
-            ['x' => 0.88, 'h' => 0.34, 'bottom' => 0.56],
+            ['x' => 0.50, 'h' => 0.43, 'bottom' => 0.40],
+            ['x' => 0.30, 'h' => 0.38, 'bottom' => 0.62],
+            ['x' => 0.70, 'h' => 0.38, 'bottom' => 0.62],
+            ['x' => 0.18, 'h' => 0.32, 'bottom' => 0.80],
+            ['x' => 0.82, 'h' => 0.32, 'bottom' => 0.80],
+            ['x' => 0.40, 'h' => 0.30, 'bottom' => 0.86],
+            ['x' => 0.60, 'h' => 0.30, 'bottom' => 0.86],
+            ['x' => 0.26, 'h' => 0.28, 'bottom' => 0.93],
+            ['x' => 0.74, 'h' => 0.28, 'bottom' => 0.93],
+            ['x' => 0.50, 'h' => 0.26, 'bottom' => 0.96],
         ];
+    }
+
+    $slots = array_slice($slots, 0, $count);
+
+    if ($count >= 4) {
+        return $slots;
     }
 
     for ($i = 0; $i < $count; $i++) {
@@ -1369,9 +1419,31 @@ private static function composite_actor_assets($background_path, $assets, $varia
         }
 
         $slots = self::actor_layout_slots($brief, count($valid_assets), $variant);
-        error_log('CMSG POSTER IDENTITY COMPOSITE MAP: path=' . $background_path . ' variant=' . sanitize_key($variant) . ' actors=' . wp_json_encode($valid_assets) . ' slots=' . wp_json_encode($slots));
+        $layer_dir = self::identity_composite_layer_dir($background_path);
+        $background_base = trailingslashit($layer_dir) . 'background_base.png';
+        $composite_path = trailingslashit($layer_dir) . 'composite_preview.png';
 
-        return self::gd_composite_actor_assets($background_path, $valid_assets, $variant, null, 0, $brief);
+        @copy($background_path, $background_base);
+        @chmod($background_base, 0664);
+
+        error_log('CMSG POSTER IDENTITY COMPOSITE MAP: path=' . $background_path . ' background_base=' . $background_base . ' composite_preview=' . $composite_path . ' variant=' . sanitize_key($variant) . ' actors=' . wp_json_encode($valid_assets) . ' slots=' . wp_json_encode($slots));
+
+        $layers = self::prepare_identity_actor_layers($valid_assets, $layer_dir);
+        if (count($layers) !== count($valid_assets)) {
+            error_log('CMSG POSTER IDENTITY COMPOSITE ERROR: actor_layer_count_mismatch expected=' . count($valid_assets) . ' prepared=' . count($layers) . ' path=' . $background_path);
+            return 0;
+        }
+
+        $placed = self::composite_prepared_actor_layers($background_path, $layers, $slots, $variant, $brief, $composite_path);
+        if ((int)$placed !== count($valid_assets) || !file_exists($composite_path) || filesize($composite_path) <= 0) {
+            error_log('CMSG POSTER IDENTITY COMPOSITE ERROR: placed_count_mismatch expected=' . count($valid_assets) . ' placed=' . intval($placed) . ' path=' . $background_path);
+            return (int)$placed;
+        }
+
+        @copy($composite_path, $background_path);
+        @chmod($background_path, 0664);
+
+        return (int)$placed;
     } catch (Throwable $e) {
         error_log('CMSG POSTER IDENTITY COMPOSITE ERROR: ' . $e->getMessage());
         return false;
@@ -1386,38 +1458,239 @@ private static function gd_load_image($path) {
     if ($mime === 'image/jpeg' && function_exists('imagecreatefromjpeg')) return imagecreatefromjpeg($path);
     if ($mime === 'image/webp' && function_exists('imagecreatefromwebp')) return imagecreatefromwebp($path);
 
+    $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+    if ($ext === 'png' && function_exists('imagecreatefrompng')) return imagecreatefrompng($path);
+    if (in_array($ext, ['jpg', 'jpeg'], true) && function_exists('imagecreatefromjpeg')) return imagecreatefromjpeg($path);
+    if ($ext === 'webp' && function_exists('imagecreatefromwebp')) return imagecreatefromwebp($path);
+
     return null;
 }
 
-private static function gd_composite_actor_assets($background_path, $assets, $variant = '', $total_count = null, $slot_offset = 0, $brief = []) {
-    if (!function_exists('imagecreatefrompng') || !function_exists('imagecopyresampled')) return false;
-    if (!file_exists($background_path) || empty($assets) || !is_array($assets)) return false;
+private static function identity_composite_layer_dir($background_path) {
+    $base = preg_replace('/\.png$/i', '', basename($background_path));
+    $dir = trailingslashit(dirname($background_path)) . $base . '-identity-layers';
+    if (!is_dir($dir)) {
+        wp_mkdir_p($dir);
+    }
+    return $dir;
+}
 
-    $canvas = imagecreatefrompng($background_path);
-    if (!$canvas) return false;
+private static function actor_layer_label($index) {
+    $index = max(0, (int)$index);
+    $letters = '';
+    do {
+        $letters = chr(65 + ($index % 26)) . $letters;
+        $index = (int)floor($index / 26) - 1;
+    } while ($index >= 0);
+    return $letters;
+}
+
+private static function remove_actor_background_to_layer($asset_path, $out) {
+    if (!is_string($asset_path) || !file_exists($asset_path)) {
+        return false;
+    }
+
+    $script = plugin_dir_path(dirname(__FILE__)) . 'tools/remove-bg.py';
+    if (!file_exists($script)) {
+        error_log('CMSG POSTER CUTOUT ERROR: remove-bg.py missing at ' . $script);
+        return false;
+    }
+
+    $python = '/opt/cmsg-bgremove/bin/python';
+    if (!file_exists($python)) {
+        $python = file_exists('/opt/cmsg-bgremove/bin/python3') ? '/opt/cmsg-bgremove/bin/python3' : 'python3';
+    }
+
+    $cmd = escapeshellcmd($python) . ' ' . escapeshellarg($script) . ' ' . escapeshellarg($asset_path) . ' ' . escapeshellarg($out) . ' 2>&1';
+    error_log('CMSG POSTER CUTOUT CMD: ' . $cmd);
+    $result = shell_exec($cmd);
+
+    if (!file_exists($out) || filesize($out) <= 0) {
+        error_log('CMSG POSTER CUTOUT ERROR: ' . print_r($result, true));
+        return false;
+    }
+
+    if (!self::png_has_transparency($out)) {
+        error_log('CMSG POSTER CUTOUT WARNING: cutout_has_no_transparency source=' . $asset_path . ' out=' . $out);
+        @unlink($out);
+        return false;
+    }
+
+    @chmod($out, 0664);
+    return true;
+}
+
+private static function png_has_transparency($path) {
+    if (!function_exists('imagecreatefrompng') || !file_exists($path)) return false;
+    $img = @imagecreatefrompng($path);
+    if (!$img) return false;
+
+    $w = imagesx($img);
+    $h = imagesy($img);
+    $step_x = max(1, (int)floor($w / 24));
+    $step_y = max(1, (int)floor($h / 24));
+
+    for ($y = 0; $y < $h; $y += $step_y) {
+        for ($x = 0; $x < $w; $x += $step_x) {
+            $rgba = imagecolorat($img, $x, $y);
+            $alpha = ($rgba >> 24) & 0x7F;
+            if ($alpha > 8) {
+                imagedestroy($img);
+                return true;
+            }
+        }
+    }
+
+    imagedestroy($img);
+    return false;
+}
+
+private static function prepare_identity_actor_layers($assets, $layer_dir) {
+    $layers = [];
+
+    foreach (array_values($assets) as $i => $asset_path) {
+        $label = self::actor_layer_label($i);
+        $layer_path = trailingslashit($layer_dir) . 'actor_' . $label . '_layer.png';
+        $ok = self::remove_actor_background_to_layer($asset_path, $layer_path);
+
+        if (!$ok) {
+            error_log('CMSG POSTER CUTOUT FALLBACK: masked_portrait_card source=' . $asset_path . ' layer=' . $layer_path);
+            $ok = self::create_masked_portrait_layer($asset_path, $layer_path);
+        }
+
+        if (!$ok || !file_exists($layer_path) || filesize($layer_path) <= 0) {
+            error_log('CMSG POSTER IDENTITY LAYER ERROR: failed_to_prepare_actor index=' . intval($i) . ' source=' . $asset_path);
+            continue;
+        }
+
+        $layers[] = [
+            'index' => $i,
+            'label' => $label,
+            'source' => $asset_path,
+            'layer' => $layer_path,
+        ];
+    }
+
+    return $layers;
+}
+
+private static function create_masked_portrait_layer($asset_path, $out) {
+    if (!function_exists('imagecreatetruecolor') || !function_exists('imagecopyresampled')) return false;
+
+    $actor = self::gd_load_image($asset_path);
+    if (!$actor) return false;
+
+    $layer_w = 720;
+    $layer_h = 1125;
+    $actor_w = imagesx($actor);
+    $actor_h = imagesy($actor);
+    if ($actor_w <= 0 || $actor_h <= 0) {
+        imagedestroy($actor);
+        return false;
+    }
+
+    $layer = imagecreatetruecolor($layer_w, $layer_h);
+    imagealphablending($layer, false);
+    imagesavealpha($layer, true);
+    $transparent = imagecolorallocatealpha($layer, 0, 0, 0, 127);
+    imagefilledrectangle($layer, 0, 0, $layer_w, $layer_h, $transparent);
+
+    $target_ratio = $layer_w / $layer_h;
+    $source_ratio = $actor_w / max(1, $actor_h);
+    $src_x = 0;
+    $src_y = 0;
+    $src_w = $actor_w;
+    $src_h = $actor_h;
+
+    if ($source_ratio > $target_ratio) {
+        $src_w = (int)round($actor_h * $target_ratio);
+        $src_x = (int)round(($actor_w - $src_w) / 2);
+    } else {
+        $src_h = (int)round($actor_w / $target_ratio);
+        $src_y = (int)round(($actor_h - $src_h) * 0.12);
+    }
+
+    $src_w = max(1, min($src_w, $actor_w));
+    $src_h = max(1, min($src_h, $actor_h));
+    $src_x = max(0, min($src_x, $actor_w - $src_w));
+    $src_y = max(0, min($src_y, $actor_h - $src_h));
+
+    imagecopyresampled($layer, $actor, 0, 0, $src_x, $src_y, $layer_w, $layer_h, $src_w, $src_h);
+    imagedestroy($actor);
+
+    for ($py = 0; $py < $layer_h; $py++) {
+        $edge_y = min($py, $layer_h - 1 - $py);
+        $bottom = 1.0;
+        $bottom_start = (int)round($layer_h * 0.74);
+        if ($py > $bottom_start) {
+            $bottom = max(0.0, 1.0 - (($py - $bottom_start) / max(1, $layer_h - $bottom_start)));
+        }
+
+        for ($px = 0; $px < $layer_w; $px++) {
+            $edge_x = min($px, $layer_w - 1 - $px);
+            $edge = min(1.0, min($edge_x / 42, $edge_y / 36));
+            $mask = max(0.0, min(1.0, $edge * max(0.16, $bottom)));
+            $rgba = imagecolorat($layer, $px, $py);
+            $a = ($rgba >> 24) & 0x7F;
+            $r = ($rgba >> 16) & 0xFF;
+            $g = ($rgba >> 8) & 0xFF;
+            $b = $rgba & 0xFF;
+            $r = (int)min(255, $r * 1.03);
+            $g = (int)min(255, $g * 0.99);
+            $b = (int)min(255, $b * 0.92);
+            $final_a = 127 - (int)round((127 - $a) * $mask);
+            $color = imagecolorallocatealpha($layer, $r, $g, $b, max(0, min(127, $final_a)));
+            imagesetpixel($layer, $px, $py, $color);
+        }
+    }
+
+    imagepng($layer, $out, 6);
+    imagedestroy($layer);
+    @chmod($out, 0664);
+    return file_exists($out) && filesize($out) > 0;
+}
+
+private static function gd_copy_alpha_resampled($dst, $src, $dst_x, $dst_y, $dst_w, $dst_h) {
+    $src_w = imagesx($src);
+    $src_h = imagesy($src);
+    if ($src_w <= 0 || $src_h <= 0 || $dst_w <= 0 || $dst_h <= 0) return false;
+
+    $tmp = imagecreatetruecolor($dst_w, $dst_h);
+    imagealphablending($tmp, false);
+    imagesavealpha($tmp, true);
+    $transparent = imagecolorallocatealpha($tmp, 0, 0, 0, 127);
+    imagefilledrectangle($tmp, 0, 0, $dst_w, $dst_h, $transparent);
+    imagecopyresampled($tmp, $src, 0, 0, 0, 0, $dst_w, $dst_h, $src_w, $src_h);
+
+    imagealphablending($dst, true);
+    imagecopy($dst, $tmp, $dst_x, $dst_y, 0, 0, $dst_w, $dst_h);
+    imagedestroy($tmp);
+    return true;
+}
+
+private static function composite_prepared_actor_layers($background_path, $layers, $slots, $variant, $brief, $composite_path) {
+    if (!function_exists('imagecreatefrompng') || !function_exists('imagecopyresampled')) return 0;
+    if (!file_exists($background_path) || empty($layers)) return 0;
+
+    $canvas = @imagecreatefrompng($background_path);
+    if (!$canvas) return 0;
 
     imagealphablending($canvas, true);
     imagesavealpha($canvas, true);
 
     $canvas_w = imagesx($canvas);
     $canvas_h = imagesy($canvas);
-    $valid_assets = array_values(array_filter($assets, function($asset) {
-        return is_string($asset) && file_exists($asset);
-    }));
+    $placed = 0;
 
-    if (empty($valid_assets)) {
-        imagedestroy($canvas);
-        return false;
-    }
+    foreach (array_values($layers) as $local_i => $layer_info) {
+        $layer_path = $layer_info['layer'] ?? '';
+        if (!$layer_path || !file_exists($layer_path)) continue;
 
-    $count = $total_count ? (int)$total_count : count($valid_assets);
-    $layout_slots = self::actor_layout_slots($brief, $count, $variant);
-    $drawn = 0;
-
-    foreach ($valid_assets as $local_i => $asset_path) {
-        $i = (int)$slot_offset + (int)$local_i;
-        $actor = self::gd_load_image($asset_path);
+        $actor = @imagecreatefrompng($layer_path);
         if (!$actor) continue;
+
+        imagealphablending($actor, true);
+        imagesavealpha($actor, true);
 
         $actor_w = imagesx($actor);
         $actor_h = imagesy($actor);
@@ -1426,54 +1699,47 @@ private static function gd_composite_actor_assets($background_path, $assets, $va
             continue;
         }
 
-        $slot = $layout_slots[$i] ?? ['x' => 0.50, 'h' => 0.50, 'bottom' => 0.70];
-        $target_h = (int)round($canvas_h * (float)$slot['h']);
-        $bottom_y = (int)round($canvas_h * (float)$slot['bottom']);
+        $slot = $slots[$local_i] ?? ['x' => 0.50, 'h' => 0.44, 'bottom' => 0.70];
+        $target_h = max(1, (int)round($canvas_h * (float)($slot['h'] ?? 0.44)));
+        $target_w = max(1, (int)round($actor_w * ($target_h / max(1, $actor_h))));
+        if ($target_w > $canvas_w * 0.72) {
+            $target_w = (int)round($canvas_w * 0.72);
+            $target_h = max(1, (int)round($actor_h * ($target_w / max(1, $actor_w))));
+        }
 
-        $scale = $target_h / $actor_h;
-        $target_w = max(1, (int)round($actor_w * $scale));
-        $target_h = max(1, (int)round($actor_h * $scale));
-
-        $x_ratio = (float)$slot['x'];
-        $x = (int)round(($canvas_w * $x_ratio) - ($target_w / 2));
+        $bottom_y = (int)round($canvas_h * (float)($slot['bottom'] ?? 0.70));
+        $x = (int)round(($canvas_w * (float)($slot['x'] ?? 0.50)) - ($target_w / 2));
         $y = (int)round($bottom_y - $target_h);
+        $x = max((int)round(-0.08 * $target_w), min($x, $canvas_w - (int)round($target_w * 0.92)));
+        $y = max(0, min($y, $canvas_h - (int)round($target_h * 0.18)));
 
-        $x = max(0, min($x, $canvas_w - $target_w));
-        $y = max(0, min($y, $canvas_h - $target_h));
+        $shadow = imagecreatetruecolor($target_w, $target_h);
+        imagealphablending($shadow, false);
+        imagesavealpha($shadow, true);
+        $clear = imagecolorallocatealpha($shadow, 0, 0, 0, 127);
+        imagefilledrectangle($shadow, 0, 0, $target_w, $target_h, $clear);
+        $shadow_color = imagecolorallocatealpha($shadow, 0, 0, 0, 76);
+        imagefilledrectangle($shadow, 10, 12, $target_w - 8, $target_h - 8, $shadow_color);
+        imagefilter($shadow, IMG_FILTER_GAUSSIAN_BLUR);
+        imagefilter($shadow, IMG_FILTER_GAUSSIAN_BLUR);
+        imagecopy($canvas, $shadow, $x + 10, $y + 12, 0, 0, $target_w, $target_h);
+        imagedestroy($shadow);
 
-        $shadow = imagecolorallocatealpha($canvas, 0, 0, 0, 70);
-        imagefilledellipse(
-            $canvas,
-            (int)round($x + ($target_w / 2)),
-            (int)round($y + ($target_h * 0.86)),
-            (int)round($target_w * 0.88),
-            (int)round($target_h * 0.24),
-            $shadow
-        );
-        $glow = imagecolorallocatealpha($canvas, 255, 232, 180, 105);
-        imagefilledellipse(
-            $canvas,
-            (int)round($x + ($target_w / 2)),
-            (int)round($y + ($target_h * 0.48)),
-            (int)round($target_w * 1.04),
-            (int)round($target_h * 0.94),
-            $glow
-        );
-
-        self::gd_copy_soft_portrait($canvas, $actor, $x, $y, $target_w, $target_h, $actor_w, $actor_h);
+        self::gd_copy_alpha_resampled($canvas, $actor, $x, $y, $target_w, $target_h);
         imagedestroy($actor);
-        $drawn++;
 
-        error_log('CMSG POSTER GD COMPOSITED ACTOR: asset=' . $asset_path . ' x=' . $x . ' y=' . $y . ' w=' . $target_w . ' h=' . $target_h);
+        $placed++;
+        error_log('CMSG POSTER IDENTITY COMPOSITE ACTOR PLACED: index=' . intval($local_i) . ' source=' . ($layer_info['source'] ?? '') . ' layer=' . $layer_path . ' x=' . $x . ' y=' . $y . ' w=' . $target_w . ' h=' . $target_h . ' z_index=' . $placed);
     }
 
-    if ($drawn > 0) {
-        imagepng($canvas, $background_path, 6);
-        @chmod($background_path, 0664);
+    if ($placed > 0) {
+        imagefilter($canvas, IMG_FILTER_COLORIZE, 10, 4, -8, 0);
+        imagepng($canvas, $composite_path, 6);
+        @chmod($composite_path, 0664);
     }
 
     imagedestroy($canvas);
-    return $drawn > 0;
+    return $placed;
 }
 
 private static function gd_copy_soft_portrait($canvas, $actor, $x, $y, $target_w, $target_h, $actor_w, $actor_h) {

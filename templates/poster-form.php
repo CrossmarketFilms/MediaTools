@@ -51,10 +51,10 @@
         <label><span>Generation mode</span>
           <select name="poster_generation_mode" id="cmmt-poster-generation-mode">
             <option value="auto" selected>Auto Recommended</option>
-            <option value="single_pass">Single Pass AI Poster (Legacy)</option>
+            <option value="single_pass">Single Pass AI Poster</option>
             <option value="identity_composite">Identity-Controlled Composite</option>
           </select>
-          <small>Auto uses Identity-Controlled Composite for ensemble casts with 4 or more uploaded actors.</small>
+          <small>Single Pass creates the most cinematic AI-integrated poster. Identity-Controlled Composite is recommended for larger casts where each uploaded actor must appear exactly once.</small>
         </label>
         <label><span>Title font style</span>
           <select name="title_font_style">
