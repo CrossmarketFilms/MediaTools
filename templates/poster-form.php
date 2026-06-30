@@ -52,7 +52,7 @@
           <select name="poster_generation_mode" id="cmmt-poster-generation-mode">
             <option value="single_pass">Single Pass AI Poster</option>
           </select>
-          <small>Single Pass AI Poster creates the most cinematic AI-integrated poster concept. The experimental cutout compositor has been removed from the customer workflow because it does not yet produce professional poster-quality placement.</small>
+          <small>Single Pass AI Poster creates the most cinematic AI-integrated poster concept and is currently limited to 4 uploaded cast members. Larger AI-generated ensembles can repeat faces or clothing, so reduce the Principal Cast before generating previews.</small>
         </label>
         <label><span>Title font style</span>
           <select name="title_font_style">

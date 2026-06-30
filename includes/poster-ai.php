@@ -9,6 +9,7 @@ final class CMSG_Poster_AI {
     private static $enable_preview_quality_check = true;
     private static $duplicate_face_similarity_threshold = 0.62;
     private static $duplicate_face_detector_method = 'embedding_with_heuristic_fallback';
+    private const SINGLE_PASS_MAX_CAST_REFERENCES = 4;
 
     private static function normalized_cast_members($brief) {
         $members = [];
@@ -516,6 +517,13 @@ public static function last_preview_quality_failures() {
 }
 
 public static function generate_previews($brief, $draft_id) {
+    $cast_count = self::cast_counts($brief)['total'];
+    if (self::poster_generation_mode($brief) === 'single_pass' && $cast_count > self::SINGLE_PASS_MAX_CAST_REFERENCES) {
+        $message = 'Single Pass AI Poster is currently limited to ' . self::SINGLE_PASS_MAX_CAST_REFERENCES . ' uploaded cast members because large ensemble AI generation can repeat actor faces and clothing. Remove supporting actors or reduce the cast before generating previews.';
+        error_log('CMSG POSTER PREVIEW BLOCKED: single_pass_large_cast draft_id=' . intval($draft_id) . ' cast_count=' . intval($cast_count));
+        return new WP_Error('single_pass_large_cast_blocked', $message);
+    }
+
     $variants = ['hero', 'emotional', 'streaming'];
     $files = [];
     self::$last_preview_quality_message = '';

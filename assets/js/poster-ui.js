@@ -199,6 +199,18 @@ jQuery(function($){
     return true;
   }
 
+  function validatePosterGenerationMode(){
+    var mode = $('#cmmt-poster-form [name="poster_generation_mode"]').val() || 'single_pass';
+    var count = filledCastCount();
+
+    if (mode === 'single_pass' && count > 4) {
+      setStatus('Single Pass AI Poster is currently limited to 4 uploaded cast members because large ensemble AI generation can repeat actor faces and clothing. Remove supporting actors or reduce the cast to 4 before generating previews.', 'is-error');
+      return false;
+    }
+
+    return true;
+  }
+
   function collectPosterPayload(){
     var castMembers = collectCastMembers();
     syncRecommendedPosterLayout();
@@ -346,6 +358,10 @@ setStatus('This image is now selected for final poster creation. Complete PayPal
     }
 
     if (!validateCastFiles()) {
+      return;
+    }
+
+    if (!validatePosterGenerationMode()) {
       return;
     }
 
