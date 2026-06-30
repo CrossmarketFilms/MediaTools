@@ -399,7 +399,11 @@ setStatus('This image is now selected for final poster creation. Complete PayPal
         renderPreviewGrid(previews);
         finishPosterProgress();
         setStep(2);
-        setStatus('Watermarked previews are ready. Click a poster to expand and select your preferred concept.', 'is-success');
+        if (prev.data.preview_quality_message) {
+          setStatus('Watermarked previews are ready. ' + prev.data.preview_quality_message, 'is-success');
+        } else {
+          setStatus('Watermarked previews are ready. Click a poster to expand and select your preferred concept.', 'is-success');
+        }
       })
       .catch(function(err){
         setPosterProgress(0, 'Preview failed.');

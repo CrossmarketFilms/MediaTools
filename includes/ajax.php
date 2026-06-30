@@ -859,6 +859,7 @@ if (is_wp_error($previews)) {
             wp_send_json_success([
             'previews' => $previews,
             'previews_count' => is_array($previews) ? count($previews) : -1,
+            'preview_quality_message' => CMSG_Poster_AI::last_preview_quality_message(),
             'watermark' => CMSG_Posters::preview_watermark(),
             'amount' => CMSG_Posters::price(),
             'prompt_preview' => CMSG_Poster_AI::build_prompt($brief),
