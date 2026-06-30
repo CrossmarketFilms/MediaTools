@@ -754,7 +754,11 @@ private static function generate_preview_format_family($clean_path, $brief) {
                 return false;
             }
         } else {
-            self::generate_native_preview_family_source($clean_path, $family_path, $brief, $key, $cfg['size']);
+            if ($key === 'banner') {
+                self::resize_png_cover_no_overlay($clean_path, $family_path, 895, 504);
+            } else {
+                self::generate_native_preview_family_source($clean_path, $family_path, $brief, $key, $cfg['size']);
+            }
         }
 
         if (file_exists($family_path) && filesize($family_path) > 0) {
@@ -978,7 +982,7 @@ foreach ($variant_map as $key => $cfg) {
 
     $format_source = $format_sources[$key];
     error_log('CMSG POSTER FINAL TRACE: ' . $key . '_clean_source_file=' . $format_source);
-    error_log('CMSG POSTER FINAL TRACE: ' . $key . '_export_mode=pre_generated_clean_source');
+    error_log('CMSG POSTER FINAL TRACE: ' . $key . '_export_mode=' . ($key === 'banner' ? 'selected_clean_preview_deterministic_cover' : 'pre_generated_clean_source'));
     self::resize_final_native_png($format_source, $out, $cfg['w'], $cfg['h'], $brief, $cfg);
 
     if (file_exists($out)) {
@@ -998,7 +1002,7 @@ private static function resolve_selected_preview_format_source($selected_preview
     $key = sanitize_key($key);
     if ($selected_preview_path === '' || $key === '') return '';
 
-    if ($key === 'vertical' && file_exists($selected_preview_path) && filesize($selected_preview_path) > 0) {
+    if (($key === 'vertical' || $key === 'banner') && file_exists($selected_preview_path) && filesize($selected_preview_path) > 0) {
         return $selected_preview_path;
     }
 

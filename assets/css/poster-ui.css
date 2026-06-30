@@ -312,6 +312,65 @@ label.cmsg-file .cmmt-upload-hint {
     background:transparent !important;
 }
 
+#cmmt-poster-download-card .cmmt-download-set {
+    display:flex !important;
+    flex-wrap:wrap !important;
+    gap:12px !important;
+    margin:16px 0 !important;
+}
+
+#cmmt-poster-download-card .cmmt-download-set .cmsg-download,
+#cmmt-poster-download-card .cmmt-download-set .cmsg-download:link,
+#cmmt-poster-download-card .cmmt-download-set .cmsg-download:visited {
+    display:inline-flex !important;
+    flex-direction:column !important;
+    align-items:center !important;
+    justify-content:center !important;
+    min-width:220px !important;
+    min-height:58px !important;
+    padding:12px 18px !important;
+    border:1px solid rgba(250,204,21,.7) !important;
+    border-radius:14px !important;
+    background:#facc15 !important;
+    color:#111827 !important;
+    -webkit-text-fill-color:#111827 !important;
+    text-decoration:none !important;
+    text-shadow:none !important;
+    box-shadow:0 10px 22px rgba(0,0,0,.22) !important;
+}
+
+#cmmt-poster-download-card .cmmt-download-set .cmsg-download:hover,
+#cmmt-poster-download-card .cmmt-download-set .cmsg-download:focus {
+    background:#fde047 !important;
+    color:#111827 !important;
+    -webkit-text-fill-color:#111827 !important;
+    transform:translateY(-1px);
+}
+
+#cmmt-poster-download-card .cmmt-download-set .cmsg-download strong,
+#cmmt-poster-download-card .cmmt-download-set .cmsg-download span {
+    display:block !important;
+    color:#111827 !important;
+    -webkit-text-fill-color:#111827 !important;
+    text-decoration:none !important;
+    text-shadow:none !important;
+    opacity:1 !important;
+    visibility:visible !important;
+}
+
+#cmmt-poster-download-card .cmmt-download-set .cmsg-download strong {
+    font-size:15px !important;
+    font-weight:900 !important;
+    line-height:1.2 !important;
+}
+
+#cmmt-poster-download-card .cmmt-download-set .cmsg-download span {
+    margin-top:4px !important;
+    font-size:12px !important;
+    font-weight:800 !important;
+    letter-spacing:.03em !important;
+}
+
 #cmmt-poster-form .cmmt-poster-step-card label,
 #cmmt-poster-form .cmmt-poster-step-card label > span,
 #cmmt-poster-form .cmmt-poster-step-card .cmsg-file > span {
