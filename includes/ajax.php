@@ -737,18 +737,13 @@ CMSG_Drafts::update_draft($draft->id, [
 
     private static function poster_generation_mode($cast_members = [], $meta = []) {
         $mode = sanitize_key(wp_unslash($_POST['poster_generation_mode'] ?? ($meta['poster_generation_mode'] ?? 'auto')));
-        $allowed = ['auto', 'single_pass', 'identity_composite'];
+        $allowed = ['auto', 'single_pass'];
 
         if (!in_array($mode, $allowed, true)) {
             $mode = 'auto';
         }
 
-        if ($mode === 'auto') {
-            $count = is_array($cast_members) ? count($cast_members) : 0;
-            return $count >= 4 ? 'identity_composite' : 'single_pass';
-        }
-
-        return $mode;
+        return 'single_pass';
     }
 
     private static function url_to_upload_path($url) {

@@ -1062,21 +1062,15 @@ private static function resolve_selected_preview_source($selected_preview_path) 
 
 private static function poster_generation_mode($brief) {
     $mode = sanitize_key($brief['poster_generation_mode'] ?? 'auto');
-    if (!in_array($mode, ['auto', 'single_pass', 'identity_composite'], true)) {
+    if (!in_array($mode, ['auto', 'single_pass'], true)) {
         $mode = 'auto';
     }
 
-    if ($mode === 'auto') {
-        return self::cast_counts($brief)['total'] >= 4 ? 'identity_composite' : 'single_pass';
-    }
-
-    return $mode;
+    return 'single_pass';
 }
 
 private static function should_use_identity_composite($brief) {
-    return self::poster_generation_mode($brief) === 'identity_composite'
-        && self::poster_layout_key($brief) !== 'no_cast_background_only'
-        && count(self::cast_actor_assets($brief)) > 0;
+    return false;
 }
 
 private static function generate_preview_candidate_file($brief, $draft_id, $variant, $index) {
@@ -1221,10 +1215,6 @@ private static function generate_image_file($brief, $id, $prefix, $variant, $ind
 error_log('CMSG CAST FACE MAP CHECK: cast1=' . ($brief['cast_actor_1'] ?? 'none') . ' cast2=' . ($brief['cast_actor_2'] ?? 'none') . ' cast3=' . ($brief['cast_actor_3'] ?? 'none'));
 
    error_log('CMSG POSTER COMPOSITE CHECK: cast_assets=' . count($cast_assets) . ' path=' . $path);
-
-    if (!empty($cast_assets) && !self::has_reference_images($brief)) {
-        self::composite_actor_assets($path, $cast_assets, $variant, $brief);
-    }
 
     if ($watermark) self::apply_watermark($path);
 

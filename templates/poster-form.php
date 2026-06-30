@@ -50,11 +50,9 @@
         </label>
         <label><span>Generation mode</span>
           <select name="poster_generation_mode" id="cmmt-poster-generation-mode">
-            <option value="auto" selected>Auto Recommended</option>
             <option value="single_pass">Single Pass AI Poster</option>
-            <option value="identity_composite">Identity-Controlled Composite</option>
           </select>
-          <small>Single Pass AI Poster: Best for cinematic AI-integrated poster concepts. Recommended for smaller casts. Identity-Controlled Composite (Beta / Advanced): Best for ensemble casts where every uploaded actor must appear exactly once. Uses layered cutouts and deterministic placement.</small>
+          <small>Single Pass AI Poster creates the most cinematic AI-integrated poster concept. The experimental cutout compositor has been removed from the customer workflow because it does not yet produce professional poster-quality placement.</small>
         </label>
         <label><span>Title font style</span>
           <select name="title_font_style">

@@ -210,7 +210,7 @@ jQuery(function($){
       mood: $('#cmmt-poster-form [name="mood"]').val(),
       style_preset: $('#cmmt-poster-form [name="style_preset"]').val(),
       poster_layout: $('#cmmt-poster-form [name="poster_layout"]').val(),
-      poster_generation_mode: $('#cmmt-poster-form [name="poster_generation_mode"]').val() || 'auto',
+      poster_generation_mode: $('#cmmt-poster-form [name="poster_generation_mode"]').val() || 'single_pass',
       poster_description: $('#cmmt-poster-form [name="poster_description"]').val(),
       title_font_style: $('#cmmt-poster-form [name="title_font_style"]').val() || 'cinematic_bold',
       tagline_font_style: $('#cmmt-poster-form [name="tagline_font_style"]').val() || 'clean_sans',
@@ -234,7 +234,7 @@ function collectPosterPayloadFormData(actionName){
     fd.set('action', actionName);
     fd.set('nonce', cmsgData.nonce);
     fd.set('poster_layout', $('#cmmt-poster-form [name="poster_layout"]').val() || recommendedPosterLayout(filledCastCount()));
-    fd.set('poster_generation_mode', $('#cmmt-poster-form [name="poster_generation_mode"]').val() || 'auto');
+    fd.set('poster_generation_mode', $('#cmmt-poster-form [name="poster_generation_mode"]').val() || 'single_pass');
     fd.set('cast_members', JSON.stringify(castMembers));
 
     fd.set('cast_actor_1_instruction', (castMembers[0] && castMembers[0].instruction) || '');
