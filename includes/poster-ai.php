@@ -552,6 +552,11 @@ try {
 
             if (!empty($quality['failed_quality_check'])) {
                 self::$last_preview_quality_failures[] = $quality;
+                if (!self::should_use_identity_composite($attempt_brief)) {
+                    error_log('CMSG POSTER PREVIEW QUALITY WARNING ONLY: draft_id=' . intval($draft_id) . ' variant=' . sanitize_key($variant) . ' attempt=' . intval($attempt) . ' reason=' . wp_json_encode($quality));
+                    $quality_passed = true;
+                    break;
+                }
                 self::reject_preview_candidate($clean_path);
                 error_log('CMSG POSTER PREVIEW QUALITY REJECTED: draft_id=' . intval($draft_id) . ' variant=' . sanitize_key($variant) . ' attempt=' . intval($attempt) . ' reason=' . wp_json_encode($quality));
                 continue;
