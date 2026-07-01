@@ -153,6 +153,51 @@ jQuery(function($){
     refreshCastMemberIndexes();
   }
 
+  function posterAssetReferenceMaxCount(){
+    return parseInt($('#cmmt-poster-asset-reference-list').data('max-count') || 10, 10);
+  }
+
+  function addPosterAssetReference(index){
+    var list = $('#cmmt-poster-asset-reference-list');
+    var template = $('#cmmt-poster-asset-reference-template').html();
+    if (!list.length || !template) return;
+
+    var number = index + 1;
+    var html = template.replace(/__INDEX__/g, index).replace(/__NUMBER__/g, number);
+    list.append(html);
+    refreshPosterAssetReferenceIndexes();
+  }
+
+  function refreshPosterAssetReferenceIndexes(){
+    var list = $('#cmmt-poster-asset-reference-list');
+
+    list.find('.cmmt-poster-asset-reference-card').each(function(index){
+      var card = $(this);
+      card.attr('data-asset-index', index);
+      card.find('h4').text('Visual Reference ' + (index + 1));
+      card.find('.cmmt-poster-asset-type').attr('name', 'poster_asset_references[' + index + '][type]');
+      card.find('.cmmt-poster-asset-image').attr('name', 'poster_asset_references[' + index + '][image]');
+      card.find('.cmmt-poster-asset-description').attr('name', 'poster_asset_references[' + index + '][description]');
+    });
+
+    $('#cmmt-add-poster-asset-reference').prop('disabled', list.find('.cmmt-poster-asset-reference-card').length >= posterAssetReferenceMaxCount());
+  }
+
+  function initPosterAssetReferences(){
+    var list = $('#cmmt-poster-asset-reference-list');
+    if (!list.length || list.children().length) return;
+
+    var initial = parseInt(list.data('initial-count') || 2, 10);
+    var max = posterAssetReferenceMaxCount();
+    initial = Math.max(1, Math.min(max, initial));
+
+    for (var i = 0; i < initial; i++) {
+      addPosterAssetReference(i);
+    }
+
+    refreshPosterAssetReferenceIndexes();
+  }
+
   function collectCastMembers(){
     var members = [];
 
@@ -167,6 +212,26 @@ jQuery(function($){
     });
 
     return members;
+  }
+
+  function collectPosterAssetReferences(){
+    var references = [];
+
+    $('#cmmt-poster-asset-reference-list .cmmt-poster-asset-reference-card').each(function(){
+      var card = $(this);
+      var input = card.find('.cmmt-poster-asset-image')[0];
+      var hasImage = !!(input && input.files && input.files.length);
+      var description = card.find('.cmmt-poster-asset-description').val() || '';
+      var type = card.find('.cmmt-poster-asset-type').val() || 'prop';
+
+      references.push({
+        type: type,
+        description: description,
+        has_image: hasImage
+      });
+    });
+
+    return references;
   }
 
   function syncLegacyCastFields(){
@@ -193,6 +258,30 @@ jQuery(function($){
 
     if (invalid.length) {
       setStatus('Unsupported actor reference file type. Upload JPG, JPEG, PNG, or WEBP only. Unsupported: ' + invalid.join(', '), 'is-error');
+      return false;
+    }
+
+    return true;
+  }
+
+  function validatePosterAssetFiles(){
+    var allowed = ['jpg', 'jpeg', 'png', 'webp'];
+    var invalid = [];
+
+    $('#cmmt-poster-asset-reference-list .cmmt-poster-asset-image, #cmmt-poster-assets').each(function(index){
+      var files = this.files || [];
+      for (var i = 0; i < files.length; i++) {
+        var file = files[i];
+        var name = (file.name || '').toLowerCase();
+        var ext = name.indexOf('.') >= 0 ? name.split('.').pop() : '';
+        if (allowed.indexOf(ext) === -1) {
+          invalid.push(file.name);
+        }
+      }
+    });
+
+    if (invalid.length) {
+      setStatus('Unsupported poster asset file type. Upload JPG, JPEG, PNG, or WEBP only. Unsupported: ' + invalid.join(', '), 'is-error');
       return false;
     }
 
@@ -229,6 +318,7 @@ jQuery(function($){
       title_position: $('#cmmt-poster-form [name="title_position"]').val() || 'bottom_cinematic',
       preserve_identity: $('#cmmt-poster-form [name="preserve_identity"]').is(':checked') ? 1 : 0,
       cast_members: castMembers,
+      poster_asset_references: collectPosterAssetReferences(),
 
       cast_actor_1_instruction: (castMembers[0] && castMembers[0].instruction) || '',
       cast_actor_2_instruction: (castMembers[1] && castMembers[1].instruction) || '',
@@ -248,6 +338,7 @@ function collectPosterPayloadFormData(actionName){
     fd.set('poster_layout', $('#cmmt-poster-form [name="poster_layout"]').val() || recommendedPosterLayout(filledCastCount()));
     fd.set('poster_generation_mode', $('#cmmt-poster-form [name="poster_generation_mode"]').val() || 'single_pass');
     fd.set('cast_members', JSON.stringify(castMembers));
+    fd.set('poster_asset_references', JSON.stringify(collectPosterAssetReferences()));
 
     fd.set('cast_actor_1_instruction', (castMembers[0] && castMembers[0].instruction) || '');
     fd.set('cast_actor_2_instruction', (castMembers[1] && castMembers[1].instruction) || '');
@@ -320,6 +411,7 @@ setStatus('This image is now selected for final poster creation. Complete PayPal
   });
 
   initCastMembers();
+  initPosterAssetReferences();
 
   $('#cmmt-add-cast-member').off('click.cmmtPosterCast').on('click.cmmtPosterCast', function(){
     var count = $('#cmmt-principal-cast-list .cmmt-cast-member-card').length;
@@ -334,6 +426,21 @@ setStatus('This image is now selected for final poster creation. Complete PayPal
       return;
     }
     refreshCastMemberIndexes();
+  });
+
+  $('#cmmt-add-poster-asset-reference').off('click.cmmtPosterAssetRef').on('click.cmmtPosterAssetRef', function(){
+    var count = $('#cmmt-poster-asset-reference-list .cmmt-poster-asset-reference-card').length;
+    if (count >= posterAssetReferenceMaxCount()) return;
+    addPosterAssetReference(count);
+  });
+
+  $(document).off('click.cmmtPosterAssetRefRemove', '.cmmt-remove-poster-asset-reference').on('click.cmmtPosterAssetRefRemove', '.cmmt-remove-poster-asset-reference', function(){
+    $(this).closest('.cmmt-poster-asset-reference-card').remove();
+    if (!$('#cmmt-poster-asset-reference-list .cmmt-poster-asset-reference-card').length) {
+      addPosterAssetReference(0);
+      return;
+    }
+    refreshPosterAssetReferenceIndexes();
   });
 
   $(document).off('input.cmmtPosterCastLayout change.cmmtPosterCastLayout', '.cmmt-cast-name, .cmmt-cast-instruction, .cmmt-cast-image')
@@ -358,6 +465,10 @@ setStatus('This image is now selected for final poster creation. Complete PayPal
     }
 
     if (!validateCastFiles()) {
+      return;
+    }
+
+    if (!validatePosterAssetFiles()) {
       return;
     }
 
@@ -478,6 +589,10 @@ setStatus('This image is now selected for final poster creation. Complete PayPal
     }
 
     if (!validateCastFiles()) {
+      return;
+    }
+
+    if (!validatePosterAssetFiles()) {
       return;
     }
 

@@ -568,6 +568,7 @@ CMSG_Drafts::update_draft($draft->id, [
         $saved = [
             'style_reference' => '',
             'poster_assets' => [],
+            'poster_asset_references' => [],
             'cast_actor_1' => '',
             'cast_actor_2' => '',
             'cast_actor_3' => '',
@@ -622,7 +623,85 @@ CMSG_Drafts::update_draft($draft->id, [
                 $saved['poster_assets'][] = $uploaded;
             }
         }
+
+        if (!empty($_FILES['poster_asset_references']['name']) && is_array($_FILES['poster_asset_references']['name'])) {
+            foreach ($_FILES['poster_asset_references']['name'] as $i => $fields) {
+                $name = is_array($fields) ? ($fields['image'] ?? '') : '';
+                if (empty($name)) continue;
+
+                $file = [
+                    'name'     => $_FILES['poster_asset_references']['name'][$i]['image'] ?? '',
+                    'type'     => $_FILES['poster_asset_references']['type'][$i]['image'] ?? '',
+                    'tmp_name' => $_FILES['poster_asset_references']['tmp_name'][$i]['image'] ?? '',
+                    'error'    => $_FILES['poster_asset_references']['error'][$i]['image'] ?? UPLOAD_ERR_NO_FILE,
+                    'size'     => $_FILES['poster_asset_references']['size'][$i]['image'] ?? 0,
+                ];
+
+                $uploaded = self::poster_upload_file($file, 'Poster visual reference ' . ((int)$i + 1));
+                if (is_wp_error($uploaded)) return $uploaded;
+                $saved['poster_asset_references'][(int)$i] = $uploaded;
+                $saved['poster_assets'][] = $uploaded;
+            }
+        }
+
+        $saved['poster_assets'] = array_values(array_unique(array_filter($saved['poster_assets'])));
         return $saved;
+    }
+
+    private static function posted_poster_asset_references($uploads = [], $meta = []) {
+        $raw = wp_unslash($_POST['poster_asset_references'] ?? '');
+        $posted = [];
+
+        if (is_string($raw) && $raw !== '') {
+            $decoded = json_decode($raw, true);
+            if (is_array($decoded)) {
+                $posted = $decoded;
+            }
+        }
+
+        if (empty($posted) && !empty($meta['poster_asset_references']) && is_array($meta['poster_asset_references'])) {
+            $posted = $meta['poster_asset_references'];
+        }
+
+        $references = [];
+        $max = 10;
+        $allowed_types = ['prop', 'logo', 'vehicle', 'building', 'product', 'style', 'symbol'];
+
+        for ($i = 0; $i < $max; $i++) {
+            $row = isset($posted[$i]) && is_array($posted[$i]) ? $posted[$i] : [];
+            $meta_reference = isset($meta['poster_asset_references'][$i]) && is_array($meta['poster_asset_references'][$i]) ? $meta['poster_asset_references'][$i] : [];
+            $type = sanitize_key($row['type'] ?? ($meta_reference['type'] ?? 'prop'));
+            if (!in_array($type, $allowed_types, true)) {
+                $type = 'prop';
+            }
+
+            $image = $uploads['poster_asset_references'][$i] ?? ($row['image'] ?? ($meta_reference['image'] ?? ''));
+            $image = is_string($image) ? sanitize_text_field($image) : '';
+            $description = sanitize_textarea_field($row['description'] ?? ($meta_reference['description'] ?? ''));
+
+            if ($image === '' && $description === '') {
+                continue;
+            }
+
+            $references[] = [
+                'type' => $type,
+                'description' => $description,
+                'image' => $image,
+            ];
+        }
+
+        if (empty($references) && !empty($meta['poster_assets']) && is_array($meta['poster_assets'])) {
+            foreach ($meta['poster_assets'] as $asset) {
+                if (!is_string($asset) || $asset === '') continue;
+                $references[] = [
+                    'type' => 'prop',
+                    'description' => '',
+                    'image' => sanitize_text_field($asset),
+                ];
+            }
+        }
+
+        return $references;
     }
 
     private static function posted_cast_members($uploads = [], $meta = []) {
@@ -766,6 +845,7 @@ CMSG_Drafts::update_draft($draft->id, [
         }
         $poster_scene_direction = self::poster_scene_direction();
         $cast_members = self::posted_cast_members($uploads);
+        $poster_asset_references = self::posted_poster_asset_references($uploads);
         $poster_layout = self::poster_layout($cast_members);
         $poster_generation_mode = self::poster_generation_mode($cast_members);
         $payload = [
@@ -786,6 +866,7 @@ CMSG_Drafts::update_draft($draft->id, [
             'source_reference' => wp_json_encode([
             'style_reference' => $uploads['style_reference'],
             'poster_assets' => $uploads['poster_assets'],
+            'poster_asset_references' => $poster_asset_references,
             'poster_layout' => $poster_layout,
             'poster_generation_mode' => $poster_generation_mode,
             'poster_description' => $poster_scene_direction,
@@ -822,6 +903,7 @@ CMSG_Drafts::update_draft($draft->id, [
 
         $poster_scene_direction = self::poster_scene_direction($meta);
         $cast_members = self::posted_cast_members([], $meta);
+        $poster_asset_references = self::posted_poster_asset_references([], $meta);
         $poster_layout = self::poster_layout($cast_members, $meta);
         $poster_generation_mode = self::poster_generation_mode($cast_members, $meta);
 
@@ -850,6 +932,7 @@ CMSG_Drafts::update_draft($draft->id, [
 
             'style_reference' => $meta['style_reference'] ?? '',
             'poster_assets' => $meta['poster_assets'] ?? [],
+            'poster_asset_references' => $poster_asset_references,
 ];
 
         $previews = CMSG_Poster_AI::generate_previews($brief, $draft->id);
@@ -908,6 +991,7 @@ if (is_wp_error($previews)) {
         $selected_preview_path = self::url_to_upload_path($selected_preview_url);
         $poster_scene_direction = self::poster_scene_direction($meta);
         $cast_members = self::posted_cast_members([], $meta);
+        $poster_asset_references = self::posted_poster_asset_references([], $meta);
         $poster_layout = self::poster_layout($cast_members, $meta);
         $poster_generation_mode = self::poster_generation_mode($cast_members, $meta);
 
@@ -941,6 +1025,7 @@ if (is_wp_error($previews)) {
 
             'style_reference' => $meta['style_reference'] ?? '',
             'poster_assets' => $meta['poster_assets'] ?? [],
+            'poster_asset_references' => $poster_asset_references,
 
         ];
 

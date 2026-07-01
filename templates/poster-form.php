@@ -129,14 +129,43 @@
 
     <div class="cmsg-card cmsg-card--glass cmmt-poster-step-card">
       <span class="cmsg-kicker">Step 2B: Props, Logos & Visual References</span>
-      <div class="cmsg-grid">
-        <label class="cmsg-file cmmt-wide">
-          <span>Props, Logos & Visual References</span>
-          <p class="cmmt-upload-hint"><strong>Do not upload actor photos here. Use Principal Cast for actors. Upload only props, logos, objects, vehicles, buildings, products, or visual references that should appear in the final poster.</strong></p>
-          <input type="file" name="poster_assets[]" id="cmmt-poster-assets" multiple accept="image/jpeg,image/png,image/webp">
-          <small>Accepted image formats: JPG, JPEG, PNG, and WEBP only.</small>
-        </label>
-      </div>
+      <p class="cmmt-upload-hint"><strong>Do not upload actor photos here. Use Principal Cast for actors. Upload only props, logos, objects, vehicles, buildings, products, or visual references that should appear in the final poster.</strong></p>
+      <p>Add each non-human visual reference separately and describe how it should be used in the poster.</p>
+      <div id="cmmt-poster-asset-reference-list" class="cmmt-poster-asset-reference-list" data-initial-count="2" data-max-count="10"></div>
+      <button type="button" class="cmsg-btn" id="cmmt-add-poster-asset-reference">Add Another Visual Reference</button>
+      <template id="cmmt-poster-asset-reference-template">
+        <div class="cmmt-poster-asset-reference-card" data-asset-index="__INDEX__">
+          <div class="cmmt-poster-asset-reference-header">
+            <h4>Visual Reference __NUMBER__</h4>
+            <button type="button" class="cmmt-remove-poster-asset-reference" aria-label="Remove visual reference">Remove</button>
+          </div>
+          <div class="cmsg-grid">
+            <label><span>Reference Type</span>
+              <select name="poster_asset_references[__INDEX__][type]" class="cmmt-poster-asset-type">
+                <option value="prop">Prop / Object</option>
+                <option value="logo">Logo / Brand Mark</option>
+                <option value="vehicle">Vehicle</option>
+                <option value="building">Building / Location</option>
+                <option value="product">Product</option>
+                <option value="style">Visual Style Reference</option>
+                <option value="symbol">Symbol / Motif</option>
+              </select>
+            </label>
+            <label class="cmsg-file"><span>Reference Image</span>
+              <input type="file" name="poster_asset_references[__INDEX__][image]" class="cmmt-poster-asset-image" accept="image/jpeg,image/png,image/webp">
+              <small>JPG, JPEG, PNG, or WEBP only. Do not upload actor photos here.</small>
+            </label>
+            <label class="cmsg-file cmmt-wide"><span>Description / Usage Direction</span>
+              <textarea name="poster_asset_references[__INDEX__][description]" class="cmmt-poster-asset-description" rows="3" placeholder="Example: red vintage car in the lower foreground; broken heart symbol above the cast; Lagos skyline in the background."></textarea>
+            </label>
+          </div>
+        </div>
+      </template>
+      <label class="cmsg-file cmmt-wide cmmt-legacy-poster-assets">
+        <span>Legacy Multi-Upload</span>
+        <input type="file" name="poster_assets[]" id="cmmt-poster-assets" multiple accept="image/jpeg,image/png,image/webp">
+        <small>Optional fallback for older drafts. New references above allow descriptions.</small>
+      </label>
     </div>
 
     <div class="cmsg-card cmsg-card--glass cmmt-poster-step-card">

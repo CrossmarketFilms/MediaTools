@@ -55,6 +55,72 @@ final class CMSG_Poster_AI {
         return $members;
     }
 
+    private static function normalized_poster_asset_references($brief) {
+        $references = [];
+        $allowed_types = ['prop', 'logo', 'vehicle', 'building', 'product', 'style', 'symbol'];
+
+        if (!empty($brief['poster_asset_references']) && is_array($brief['poster_asset_references'])) {
+            foreach ($brief['poster_asset_references'] as $reference) {
+                if (!is_array($reference)) continue;
+
+                $type = sanitize_key($reference['type'] ?? 'prop');
+                if (!in_array($type, $allowed_types, true)) {
+                    $type = 'prop';
+                }
+
+                $row = [
+                    'type' => $type,
+                    'description' => sanitize_textarea_field($reference['description'] ?? ''),
+                    'image' => is_string($reference['image'] ?? '') ? (string)$reference['image'] : '',
+                ];
+
+                if ($row['description'] !== '' || $row['image'] !== '') {
+                    $references[] = $row;
+                }
+            }
+        }
+
+        if (empty($references) && !empty($brief['poster_assets']) && is_array($brief['poster_assets'])) {
+            foreach ($brief['poster_assets'] as $asset) {
+                if (!is_string($asset) || $asset === '') continue;
+                $references[] = [
+                    'type' => 'prop',
+                    'description' => '',
+                    'image' => $asset,
+                ];
+            }
+        }
+
+        return array_slice($references, 0, 10);
+    }
+
+    private static function poster_asset_reference_prompt_lines($brief) {
+        $lines = [];
+        $type_labels = [
+            'prop' => 'Prop / Object',
+            'logo' => 'Logo / Brand Mark',
+            'vehicle' => 'Vehicle',
+            'building' => 'Building / Location',
+            'product' => 'Product',
+            'style' => 'Visual Style Reference',
+            'symbol' => 'Symbol / Motif',
+        ];
+
+        foreach (self::normalized_poster_asset_references($brief) as $index => $reference) {
+            $label = 'Reference ' . ((int)$index + 1);
+            $type = $type_labels[$reference['type']] ?? 'Prop / Object';
+            $description = $reference['description'] !== ''
+                ? $reference['description']
+                : 'Use this image as a non-human visual reference only.';
+
+            $lines[] = "{$label}\n"
+                . "Type: {$type}\n"
+                . "Usage: {$description}";
+        }
+
+        return implode("\n\n", $lines);
+    }
+
     private static function cast_prompt_lines($brief) {
         $lines = [];
 
@@ -316,6 +382,7 @@ final class CMSG_Poster_AI {
         }
 
         $cast_lines = self::cast_prompt_lines($brief);
+        $asset_reference_lines = self::poster_asset_reference_prompt_lines($brief);
         $cast_counts = self::cast_counts($brief);
         $identity_registry = self::identity_registry_prompt($brief);
         $composition_rules = self::composition_registry_rules($brief);
@@ -337,7 +404,7 @@ final class CMSG_Poster_AI {
 
         $style = sanitize_text_field($brief['style_preset'] ?? 'cinematic_premium');
         $has_style_reference = !empty($brief['style_reference']);
-        $asset_count = !empty($brief['poster_assets']) && is_array($brief['poster_assets']) ? count($brief['poster_assets']) : 0;
+        $asset_count = count(self::normalized_poster_asset_references($brief));
 $background_only = !empty($brief['background_only']);
 if ($layout === 'no_cast_background_only') {
     $background_only = true;
@@ -363,6 +430,9 @@ INDIVIDUAL ACTOR REGISTRY:
 {$placement_mapping}
 POSTER SCENE DIRECTION:
 {$description}
+
+VISUAL REFERENCE REGISTRY:
+" . ($asset_reference_lines !== '' ? $asset_reference_lines . "\n" : "No non-human visual references provided.\n") . "
 
 STRICT BACKGROUND-ONLY RULES:
 - Do NOT generate people.
@@ -410,15 +480,17 @@ STRICT BACKGROUND-ONLY RULES:
             . "{$placement_mapping}\n"
             . "{$composition_rules}\n"
             . "POSTER SCENE DIRECTION:\n{$description}\n\n"
+            . "VISUAL REFERENCE REGISTRY:\n"
+            . ($asset_reference_lines !== '' ? $asset_reference_lines . "\n\n" : "No non-human visual references provided.\n\n")
             . "CAST HIERARCHY:\n"
             . "- Lead Character references: {$cast_counts['lead']}. Render lead characters as the most visually prominent cast members.\n"
             . "- Supporting Character references: {$cast_counts['supporting']}. Render supporting characters clearly but smaller or secondary.\n"
             . "- Each cast reference must appear exactly once as one character only. Do not repeat any cast member as a second face, background extra, bottom montage, reflection, or crowd duplicate.\n"
             . ($ensemble_text !== '' ? "- {$ensemble_text}" : '')
             . "REFERENCE INPUTS:\n"
-            . ($has_style_reference ? "- A style reference image is provided. Use it ONLY for mood, lighting, composition, palette, typography placement, and cinematic design language. Do NOT copy faces, people, actors, logos, or text from the style reference. Actor identity must come only from poster asset images.\n" : '')
+            . ($has_style_reference ? "- A style reference image is provided. Use it ONLY for mood, lighting, composition, palette, typography placement, and cinematic design language. Do NOT copy faces, people, actors, logos, or text from the style reference. Actor identity must come only from Principal Cast images.\n" : '')
             . ($asset_count > 0
-              ? "- {$asset_count} props/logos/visual reference image(s) are provided. Treat them as non-human visual references for objects, symbols, products, vehicles, buildings, logos, props, palette, and atmosphere. Do not treat these as actor photos or cast identity sources.\n"
+              ? "- {$asset_count} props/logos/visual reference image(s) are provided with descriptions in the Visual Reference Registry. Treat them as non-human visual references for objects, symbols, products, vehicles, buildings, logos, props, palette, and atmosphere. Do not treat these as actor photos or cast identity sources.\n"
               : '') 
             . (
                  !empty($brief['preserve_identity'])
@@ -2337,13 +2409,25 @@ foreach ($cast_reference_assets as $cast_asset) {
 error_log('CMSG POSTER CAST REF COUNT: ' . count($cast_reference_assets));
 error_log('CMSG POSTER ASSET COUNT: ' . count($brief['poster_assets'] ?? [])); 
 
-if (!empty($brief['poster_assets']) && is_array($brief['poster_assets'])) {
-foreach ($brief['poster_assets'] as $asset) {
+        $visual_reference_assets = [];
+        if (!empty($brief['poster_assets']) && is_array($brief['poster_assets'])) {
+            foreach ($brief['poster_assets'] as $asset) {
+                if (is_string($asset) && $asset !== '') {
+                    $visual_reference_assets[] = $asset;
+                }
+            }
+        }
+        foreach (self::normalized_poster_asset_references($brief) as $reference) {
+            if (!empty($reference['image']) && is_string($reference['image'])) {
+                $visual_reference_assets[] = $reference['image'];
+            }
+        }
+        $visual_reference_assets = array_values(array_unique($visual_reference_assets));
+
+foreach ($visual_reference_assets as $asset) {
     $normalized = self::normalize_reference_image_for_openai($asset);
     if ($normalized) $add_file('image[]', $normalized);
 }
-
-        }
         $body .= "--{$boundary}--{$eol}";
 
         return wp_remote_post('https://api.openai.com/v1/images/edits', [
@@ -2379,10 +2463,21 @@ private static function has_reference_images($brief) {
         }
     }
 
+    $visual_reference_assets = [];
     if (!empty($brief['poster_assets']) && is_array($brief['poster_assets'])) {
         foreach ($brief['poster_assets'] as $asset) {
-            if (self::is_valid_openai_image($asset)) return true;
+            if (is_string($asset) && $asset !== '') {
+                $visual_reference_assets[] = $asset;
+            }
         }
+    }
+    foreach (self::normalized_poster_asset_references($brief) as $reference) {
+        if (!empty($reference['image']) && is_string($reference['image'])) {
+            $visual_reference_assets[] = $reference['image'];
+        }
+    }
+    foreach (array_unique($visual_reference_assets) as $asset) {
+            if (self::is_valid_openai_image($asset)) return true;
     }
 
     return false;

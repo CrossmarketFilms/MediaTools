@@ -222,6 +222,78 @@ label.cmsg-file .cmmt-upload-hint {
     background:rgba(15, 23, 42, 0.58);
 }
 
+.cmmt-poster-asset-reference-list {
+    display:grid;
+    gap:14px;
+    margin:14px 0;
+}
+
+.cmmt-poster-asset-reference-card {
+    border:1px solid rgba(148, 163, 184, 0.35);
+    border-radius:12px;
+    padding:16px;
+    background:rgba(15, 23, 42, 0.58);
+}
+
+.cmmt-poster-asset-reference-header {
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:12px;
+    margin-bottom:12px;
+}
+
+.cmmt-poster-asset-reference-card h4 {
+    margin:0;
+    color:#f8fafc !important;
+    -webkit-text-fill-color:#f8fafc !important;
+    font-size:16px;
+    font-weight:900;
+}
+
+.cmmt-remove-poster-asset-reference {
+    appearance:none;
+    border:1px solid rgba(248, 113, 113, 0.55);
+    border-radius:8px;
+    background:rgba(127, 29, 29, 0.28);
+    color:#fecaca !important;
+    -webkit-text-fill-color:#fecaca !important;
+    font-weight:800;
+    font-size:13px;
+    padding:8px 10px;
+    cursor:pointer;
+}
+
+.cmmt-remove-poster-asset-reference:hover,
+.cmmt-remove-poster-asset-reference:focus {
+    background:#991b1b;
+    border-color:#fecaca;
+    color:#ffffff !important;
+    -webkit-text-fill-color:#ffffff !important;
+}
+
+#cmmt-add-poster-asset-reference {
+    margin-top:4px;
+    background:#facc15 !important;
+    border:1px solid #eab308 !important;
+    color:#111827 !important;
+    -webkit-text-fill-color:#111827 !important;
+    font-weight:900 !important;
+}
+
+#cmmt-add-poster-asset-reference:hover,
+#cmmt-add-poster-asset-reference:focus {
+    background:#fde047 !important;
+    border-color:#facc15 !important;
+    color:#111827 !important;
+    -webkit-text-fill-color:#111827 !important;
+}
+
+.cmmt-legacy-poster-assets {
+    margin-top:16px !important;
+    opacity:.88;
+}
+
 .cmmt-cast-member-header {
     display:flex;
     align-items:center;
