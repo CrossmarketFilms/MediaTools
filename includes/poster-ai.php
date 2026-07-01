@@ -755,7 +755,7 @@ private static function generate_preview_format_family($clean_path, $brief) {
             }
         } else {
             if ($key === 'banner') {
-                self::resize_png_fit_blur_no_overlay($clean_path, $family_path, 895, 504);
+                self::resize_png_cover_no_overlay($clean_path, $family_path, 895, 504);
             } else {
                 self::generate_native_preview_family_source($clean_path, $family_path, $brief, $key, $cfg['size']);
             }
@@ -2448,17 +2448,7 @@ private static function resize_final_native_png($src, $dest, $target_w, $target_
 
     $src_w = imagesx($img);
     $src_h = imagesy($img);
-
-    $src_aspect = $src_w / max(1, $src_h);
-    $target_aspect = $target_w / max(1, $target_h);
-
-    if ($target_aspect > 1.3 && $src_aspect < 1.0) {
-        $canvas = self::poster_fit_blur_canvas($img, $src_w, $src_h, $target_w, $target_h);
-        if (!$canvas) {
-            imagedestroy($img);
-            return false;
-        }
-    } else {
+    $canvas = imagecreatetruecolor($target_w, $target_h);
         $canvas = imagecreatetruecolor($target_w, $target_h);
 
         // Native final should cover the frame exactly.
@@ -2470,8 +2460,6 @@ private static function resize_final_native_png($src, $dest, $target_w, $target_
         $dst_y = (int) floor(($target_h - $new_h) / 2);
 
         imagecopyresampled($canvas, $img, $dst_x, $dst_y, 0, 0, $new_w, $new_h, $src_w, $src_h);
-    }
-
     imagepng($canvas, $dest, 9);
 
     imagedestroy($img);
