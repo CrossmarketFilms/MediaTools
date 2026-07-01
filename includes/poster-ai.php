@@ -755,7 +755,7 @@ private static function generate_preview_format_family($clean_path, $brief) {
             }
         } else {
             if ($key === 'banner') {
-                self::resize_png_cover_no_overlay($clean_path, $family_path, 895, 504);
+                self::resize_png_fit_blur_no_overlay($clean_path, $family_path, 895, 504);
             } else {
                 self::generate_native_preview_family_source($clean_path, $family_path, $brief, $key, $cfg['size']);
             }
@@ -2449,17 +2449,28 @@ private static function resize_final_native_png($src, $dest, $target_w, $target_
     $src_w = imagesx($img);
     $src_h = imagesy($img);
 
-    $canvas = imagecreatetruecolor($target_w, $target_h);
+    $src_aspect = $src_w / max(1, $src_h);
+    $target_aspect = $target_w / max(1, $target_h);
 
-    // Native final should cover the frame exactly.
-    $scale = max($target_w / $src_w, $target_h / $src_h);
-    $new_w = (int) ceil($src_w * $scale);
-    $new_h = (int) ceil($src_h * $scale);
+    if ($target_aspect > 1.3 && $src_aspect < 1.0) {
+        $canvas = self::poster_fit_blur_canvas($img, $src_w, $src_h, $target_w, $target_h);
+        if (!$canvas) {
+            imagedestroy($img);
+            return false;
+        }
+    } else {
+        $canvas = imagecreatetruecolor($target_w, $target_h);
 
-    $dst_x = (int) floor(($target_w - $new_w) / 2);
-    $dst_y = (int) floor(($target_h - $new_h) / 2);
+        // Native final should cover the frame exactly.
+        $scale = max($target_w / $src_w, $target_h / $src_h);
+        $new_w = (int) ceil($src_w * $scale);
+        $new_h = (int) ceil($src_h * $scale);
 
-    imagecopyresampled($canvas, $img, $dst_x, $dst_y, 0, 0, $new_w, $new_h, $src_w, $src_h);
+        $dst_x = (int) floor(($target_w - $new_w) / 2);
+        $dst_y = (int) floor(($target_h - $new_h) / 2);
+
+        imagecopyresampled($canvas, $img, $dst_x, $dst_y, 0, 0, $new_w, $new_h, $src_w, $src_h);
+    }
 
     imagepng($canvas, $dest, 9);
 
@@ -2468,6 +2479,71 @@ private static function resize_final_native_png($src, $dest, $target_w, $target_
 
     self::overlay_title_and_tagline($dest, $brief, $target_w, $target_h, $cfg);
     return true;
+}
+
+private static function poster_fit_blur_canvas($img, $src_w, $src_h, $target_w, $target_h) {
+    if (!$img || $src_w <= 0 || $src_h <= 0 || $target_w <= 0 || $target_h <= 0) {
+        return false;
+    }
+
+    $canvas = imagecreatetruecolor($target_w, $target_h);
+
+    $bg_scale = max($target_w / $src_w, $target_h / $src_h);
+    $bg_w = (int)ceil($src_w * $bg_scale);
+    $bg_h = (int)ceil($src_h * $bg_scale);
+    $bg_x = (int)floor(($target_w - $bg_w) / 2);
+    $bg_y = (int)floor(($target_h - $bg_h) / 2);
+
+    imagecopyresampled($canvas, $img, $bg_x, $bg_y, 0, 0, $bg_w, $bg_h, $src_w, $src_h);
+    if (function_exists('imagefilter')) {
+        for ($i = 0; $i < 12; $i++) {
+            imagefilter($canvas, IMG_FILTER_GAUSSIAN_BLUR);
+        }
+        imagefilter($canvas, IMG_FILTER_BRIGHTNESS, -18);
+        imagefilter($canvas, IMG_FILTER_CONTRAST, 8);
+    }
+
+    $shade = imagecolorallocatealpha($canvas, 0, 0, 0, 58);
+    imagefilledrectangle($canvas, 0, 0, $target_w, $target_h, $shade);
+
+    $fg_scale = min(($target_w * 0.96) / $src_w, ($target_h * 0.96) / $src_h);
+    $fg_w = (int)floor($src_w * $fg_scale);
+    $fg_h = (int)floor($src_h * $fg_scale);
+    $fg_x = (int)floor(($target_w - $fg_w) / 2);
+    $fg_y = (int)floor(($target_h - $fg_h) / 2);
+
+    $shadow = imagecolorallocatealpha($canvas, 0, 0, 0, 62);
+    imagefilledrectangle($canvas, $fg_x - 8, $fg_y + 8, $fg_x + $fg_w + 8, $fg_y + $fg_h + 10, $shadow);
+    imagecopyresampled($canvas, $img, $fg_x, $fg_y, 0, 0, $fg_w, $fg_h, $src_w, $src_h);
+
+    return $canvas;
+}
+
+private static function resize_png_fit_blur_no_overlay($src, $dest, $target_w, $target_h) {
+    if (!function_exists('imagecreatefrompng') || !file_exists($src)) return false;
+
+    $img = imagecreatefrompng($src);
+    if (!$img) return false;
+
+    $src_w = imagesx($img);
+    $src_h = imagesy($img);
+    $canvas = self::poster_fit_blur_canvas($img, $src_w, $src_h, $target_w, $target_h);
+    imagedestroy($img);
+
+    if (!$canvas) return false;
+
+    $tmp = $dest . '.tmp-' . wp_generate_password(8, false) . '.png';
+    $ok = imagepng($canvas, $tmp, 9);
+    imagedestroy($canvas);
+
+    if (!$ok || !file_exists($tmp)) {
+        @unlink($tmp);
+        return false;
+    }
+
+    @rename($tmp, $dest);
+    @chmod($dest, 0664);
+    return file_exists($dest) && filesize($dest) > 0;
 }
 
 private static function resize_png_cover_no_overlay($src, $dest, $target_w, $target_h) {
