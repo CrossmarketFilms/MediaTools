@@ -826,10 +826,8 @@ private static function generate_preview_format_family($clean_path, $brief) {
                 return false;
             }
         } else {
-            if ($key === 'banner') {
-                self::resize_png_cover_no_overlay($clean_path, $family_path, 895, 504);
-            } else {
-                self::generate_native_preview_family_source($clean_path, $family_path, $brief, $key, $cfg['size']);
+            if (!self::generate_native_preview_family_source($clean_path, $family_path, $brief, $key, $cfg['size'])) {
+                return false;
             }
         }
 
@@ -956,6 +954,13 @@ private static function generate_native_preview_family_source($selected_preview_
     $prompt .= "Preserve the same cast, actor likenesses, emotional expressions, wardrobe, broken-heart symbol, lighting, color palette, mood, and city skyline concept.\n";
     $prompt .= "Recompose naturally for this output format. All actor faces, heads, eyes, mouths, hairlines, and important facial features must be fully visible inside the frame with safe margins.\n";
     $prompt .= "Do not crop off side faces. Do not cut off foreheads, chins, eyes, or partial faces.\n";
+    if ($key === 'banner') {
+        $prompt .= "This must be a true native wide landscape composition, not a crop from the vertical poster.\n";
+        $prompt .= "Reflow the composition horizontally like an official streaming platform hero banner.\n";
+        $prompt .= "Preserve all principal cast, preserve actor prominence hierarchy, preserve background storytelling, and preserve vehicle/logo/prop placement whenever possible.\n";
+        $prompt .= "Never simply crop the center of the portrait poster. Never clip heads, faces, eyes, foreheads, chins, or important props.\n";
+        $prompt .= "Maintain cinematic left-to-right balance and leave lower-center title-safe space for final typography.\n";
+    }
     $prompt .= "Leave clean lower title-safe space. Do not render the movie title, tagline, credits, or any readable text; the plugin overlays typography later.\n";
     $prompt .= "The result must look like finished professional theatrical/streaming key art, not a collage and not a screenshot.\n";
 
