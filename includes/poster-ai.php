@@ -1053,8 +1053,14 @@ foreach ($variant_map as $key => $cfg) {
     $out = trailingslashit($dir) . $slug . '-' . intval($job_id) . '-' . $key . '.png';
 
     $format_source = $format_sources[$key];
+    $export_mode = 'pre_generated_clean_source';
+    if ($key === 'banner') {
+        $export_mode = realpath($format_source) === realpath($selected_preview_path)
+            ? 'selected_clean_preview_deterministic_cover_fallback'
+            : 'pre_generated_banner_source';
+    }
     error_log('CMSG POSTER FINAL TRACE: ' . $key . '_clean_source_file=' . $format_source);
-    error_log('CMSG POSTER FINAL TRACE: ' . $key . '_export_mode=' . ($key === 'banner' ? 'selected_clean_preview_deterministic_cover' : 'pre_generated_clean_source'));
+    error_log('CMSG POSTER FINAL TRACE: ' . $key . '_export_mode=' . $export_mode);
     self::resize_final_native_png($format_source, $out, $cfg['w'], $cfg['h'], $brief, $cfg);
 
     if (file_exists($out)) {
@@ -1074,12 +1080,12 @@ private static function resolve_selected_preview_format_source($selected_preview
     $key = sanitize_key($key);
     if ($selected_preview_path === '' || $key === '') return '';
 
-    if (($key === 'vertical' || $key === 'banner') && file_exists($selected_preview_path) && filesize($selected_preview_path) > 0) {
+    if ($key === 'vertical' && file_exists($selected_preview_path) && filesize($selected_preview_path) > 0) {
         return $selected_preview_path;
     }
 
     $candidates = [];
-    if ($key !== 'vertical') {
+    if ($key === 'banner') {
         $candidates[] = self::preview_family_path($selected_preview_path, $key);
     }
 
@@ -1088,7 +1094,7 @@ private static function resolve_selected_preview_format_source($selected_preview
         if ($key === 'vertical' && file_exists($clean_path) && filesize($clean_path) > 0) {
             return $clean_path;
         }
-        if ($key !== 'vertical') {
+        if ($key === 'banner') {
             $candidates[] = self::preview_family_path($clean_path, $key);
         }
     }
@@ -1106,6 +1112,10 @@ private static function resolve_selected_preview_format_source($selected_preview
         if (file_exists($candidate) && filesize($candidate) > 0) {
             return $candidate;
         }
+    }
+
+    if ($key === 'banner' && file_exists($selected_preview_path) && filesize($selected_preview_path) > 0) {
+        return $selected_preview_path;
     }
 
     return '';
