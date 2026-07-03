@@ -811,24 +811,18 @@ private static function preview_duplicate_face_quality_check($clean_path, $brief
 private static function generate_preview_format_family($clean_path, $brief) {
     if (empty($clean_path) || !file_exists($clean_path)) return false;
 
-    $family = [
-        'banner' => ['size' => '1536x1024'],
-    ];
+    $master_path = self::create_campaign_master_source($clean_path, $brief);
+    if (!$master_path) return false;
+
+    $family = self::campaign_variant_config();
+    unset($family['vertical']);
 
     foreach ($family as $key => $cfg) {
         $family_path = self::preview_family_path($clean_path, $key);
-        if (file_exists($family_path) && filesize($family_path) > 0) {
-            continue;
-        }
+        if (file_exists($family_path) && filesize($family_path) > 0) continue;
 
-        if (self::should_use_identity_composite($brief)) {
-            if (!self::generate_identity_composite_family_source($brief, $family_path, $key, $cfg['size'])) {
-                return false;
-            }
-        } else {
-            if (!self::generate_native_preview_family_source($clean_path, $family_path, $brief, $key, $cfg['size'])) {
-                return false;
-            }
+        if (!self::generate_campaign_adaptation($master_path, $brief, $key, (int)$cfg['w'], (int)$cfg['h'], $family_path)) {
+            return false;
         }
 
         if (file_exists($family_path) && filesize($family_path) > 0) {
@@ -841,6 +835,121 @@ private static function generate_preview_format_family($clean_path, $brief) {
     }
 
     return true;
+}
+
+private static function campaign_variant_config() {
+    return [
+        'vertical' => ['w' => 900, 'h' => 1285, 'size' => '1024x1536'],
+        'banner' => ['w' => 895, 'h' => 504, 'size' => '1536x1024'],
+    ];
+}
+
+private static function create_campaign_master_source($selected_preview_path, $brief) {
+    if (empty($selected_preview_path) || !file_exists($selected_preview_path) || filesize($selected_preview_path) <= 0) {
+        error_log('CMSG CAMPAIGN MASTER: missing selected_preview_path=' . (string)$selected_preview_path);
+        return '';
+    }
+
+    $master_path = preg_replace('/\.png$/i', '-campaign-master.png', $selected_preview_path);
+    if (!$master_path) return '';
+
+    if (!file_exists($master_path) || filesize($master_path) <= 0 || filemtime($master_path) < filemtime($selected_preview_path)) {
+        @copy($selected_preview_path, $master_path);
+        @chmod($master_path, 0664);
+    }
+
+    error_log('CMSG CAMPAIGN MASTER: selected=' . $selected_preview_path . ' master=' . $master_path);
+    return (file_exists($master_path) && filesize($master_path) > 0) ? $master_path : '';
+}
+
+private static function generate_campaign_adaptation($campaign_master_path, $brief, $variant, $target_w, $target_h, $out) {
+    $variant = sanitize_key($variant);
+    if (empty($campaign_master_path) || !file_exists($campaign_master_path) || empty($out)) {
+        error_log('CMSG CAMPAIGN ADAPTATION: invalid_input variant=' . $variant);
+        return false;
+    }
+
+    if ($variant === 'vertical') {
+        @copy($campaign_master_path, $out);
+        self::resize_png_cover_no_overlay($out, $out, (int)$target_w, (int)$target_h);
+        @chmod($out, 0664);
+        error_log('CMSG CAMPAIGN VARIANT: variant=vertical mode=master_resize out=' . $out);
+        return file_exists($out) && filesize($out) > 0;
+    }
+
+    $api_key = trim((string) CMSG_Plugin::settings()['openai_api_key']);
+    if (!$api_key) return false;
+
+    $prompt = self::build_campaign_adaptation_prompt($brief, $variant, (int)$target_w, (int)$target_h);
+    $edit_brief = is_array($brief) ? $brief : [];
+    $edit_brief['style_reference'] = $campaign_master_path;
+    if (empty($edit_brief['poster_assets']) || !is_array($edit_brief['poster_assets'])) {
+        $edit_brief['poster_assets'] = [];
+    }
+
+    $size = ((int)$target_w > (int)$target_h) ? '1536x1024' : '1024x1536';
+    error_log('CMSG CAMPAIGN ADAPTATION: variant=' . $variant . ' master=' . $campaign_master_path . ' out=' . $out);
+
+    $response = self::call_image_edit($api_key, $prompt, $edit_brief, $size);
+    if (is_wp_error($response)) {
+        error_log('CMSG CAMPAIGN ADAPTATION ERROR: ' . $response->get_error_message());
+        return false;
+    }
+
+    $code = wp_remote_retrieve_response_code($response);
+    $body = wp_remote_retrieve_body($response);
+    $data = json_decode($body, true);
+    if ($code < 200 || $code >= 300 || empty($data['data'][0]['b64_json'])) {
+        error_log('CMSG CAMPAIGN ADAPTATION ERROR CODE: ' . $code . ' BODY: ' . $body);
+        return false;
+    }
+
+    $image_data = base64_decode($data['data'][0]['b64_json']);
+    if (!$image_data) return false;
+
+    file_put_contents($out, $image_data);
+    @chmod($out, 0664);
+    self::resize_png_cover_no_overlay($out, $out, (int)$target_w, (int)$target_h);
+    error_log('CMSG CAMPAIGN VARIANT: variant=' . $variant . ' mode=campaign_adaptation out=' . $out);
+
+    return file_exists($out) && filesize($out) > 0;
+}
+
+private static function build_campaign_adaptation_prompt($brief, $variant, $target_w, $target_h) {
+    $variant = sanitize_key($variant);
+    $title = sanitize_text_field($brief['title'] ?? ($brief['movie_title'] ?? 'Untitled Film'));
+    $layout = ($variant === 'banner') ? 'wide 895x504 streaming platform hero banner' : 'vertical 900x1285 theatrical poster';
+
+    $prompt = "This is not a new poster generation. This is a campaign artwork adaptation task.
+";
+    $prompt .= "The uploaded selected preview is the approved master campaign artwork for {$title}.
+";
+    $prompt .= "Adapt the approved master artwork into a {$layout}.
+";
+    $prompt .= "Preserve the exact same faces, wardrobe, pose direction, expressions, lighting, color grade, vehicle, props, symbols, and background story visible in the approved master.
+";
+    $prompt .= "Only adapt the canvas and composition to the requested output size {$target_w}x{$target_h}.
+";
+    $prompt .= "Do not redesign or replace any cast member. Do not add duplicate actors. Do not introduce new people.
+";
+    $prompt .= "Do not add props, symbols, skylines, cars, or background elements that are not visible in the approved master.
+";
+    $prompt .= "Do not change character count, wardrobe, facial likeness, emotional expression, vehicle, color palette, lighting, or movie concept.
+";
+    $prompt .= "Keep every head, forehead, eyes, mouth, chin, and face fully visible with safe margins.
+";
+    if ($variant === 'banner') {
+        $prompt .= "For the banner, expand or outpaint left and right background only where needed, using the same campaign world and color grade from the approved master.
+";
+        $prompt .= "Reposition or extend the approved composition only enough to fit the wide landscape canvas while preserving the approved campaign identity.
+";
+        $prompt .= "Leave lower-center title-safe space for typography. Do not render the movie title, tagline, credits, or readable text.
+";
+    }
+    $prompt .= "The result must feel like one Netflix/Tubi/Amazon campaign adapted into another platform size, not a separate poster.
+";
+
+    return $prompt;
 }
 
 private static function preview_family_path($clean_path, $key) {
