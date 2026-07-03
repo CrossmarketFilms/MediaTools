@@ -1406,18 +1406,8 @@ private static function actor_layout_slots($brief, $count, $variant = '') {
     }
 
     if ($variant === 'banner') {
-        $slots = [
-            ['x' => 0.15, 'y' => 0.16, 'w' => 0.18, 'h' => 0.72, 'anchor' => 'top_center', 'opacity' => 0.98, 'shadow' => 0.62],
-            ['x' => 0.32, 'y' => 0.12, 'w' => 0.19, 'h' => 0.76, 'anchor' => 'top_center', 'opacity' => 1.00, 'shadow' => 0.66],
-            ['x' => 0.50, 'y' => 0.08, 'w' => 0.21, 'h' => 0.82, 'anchor' => 'top_center', 'opacity' => 1.00, 'shadow' => 0.70],
-            ['x' => 0.68, 'y' => 0.12, 'w' => 0.19, 'h' => 0.76, 'anchor' => 'top_center', 'opacity' => 1.00, 'shadow' => 0.66],
-            ['x' => 0.85, 'y' => 0.16, 'w' => 0.18, 'h' => 0.72, 'anchor' => 'top_center', 'opacity' => 0.98, 'shadow' => 0.62],
-            ['x' => 0.07, 'y' => 0.24, 'w' => 0.16, 'h' => 0.62, 'anchor' => 'top_center', 'opacity' => 0.96, 'shadow' => 0.58],
-            ['x' => 0.93, 'y' => 0.24, 'w' => 0.16, 'h' => 0.62, 'anchor' => 'top_center', 'opacity' => 0.96, 'shadow' => 0.58],
-            ['x' => 0.41, 'y' => 0.22, 'w' => 0.16, 'h' => 0.64, 'anchor' => 'top_center', 'opacity' => 0.96, 'shadow' => 0.58],
-            ['x' => 0.59, 'y' => 0.22, 'w' => 0.16, 'h' => 0.64, 'anchor' => 'top_center', 'opacity' => 0.96, 'shadow' => 0.58],
-            ['x' => 0.24, 'y' => 0.25, 'w' => 0.15, 'h' => 0.58, 'anchor' => 'top_center', 'opacity' => 0.95, 'shadow' => 0.54],
-        ];
+        $slots = self::adaptive_banner_actor_slots($brief, $count);
+        error_log('CMSG BANNER ADAPTIVE SLOTS: ' . wp_json_encode($slots));
     } elseif ($count === 1) {
         $slots = [
             ['x' => 0.50, 'y' => 0.12, 'w' => 0.54, 'h' => 0.62, 'anchor' => 'top_center', 'opacity' => 1.00, 'shadow' => 0.74],
@@ -1497,6 +1487,80 @@ private static function actor_layout_slots($brief, $count, $variant = '') {
 
     return $slots;
 }
+
+
+private static function adaptive_banner_actor_slots($brief, $count) {
+    $count = max(0, min(10, (int)$count));
+    if ($count <= 0) return [];
+
+    $members = self::normalized_cast_members($brief);
+    $patterns = [
+        1 => [0.46],
+        2 => [0.36, 0.64],
+        3 => [0.50, 0.28, 0.72],
+        4 => [0.39, 0.61, 0.20, 0.80],
+        5 => [0.50, 0.34, 0.66, 0.17, 0.83],
+        6 => [0.38, 0.62, 0.22, 0.78, 0.12, 0.88],
+    ];
+    $xs = $patterns[min($count, 6)] ?? $patterns[6];
+    $slots = [];
+
+    for ($i = 0; $i < $count; $i++) {
+        $role = sanitize_key($members[$i]['role'] ?? ($i < 2 ? 'lead' : 'supporting'));
+        $is_lead = ($role === 'lead');
+
+        $slots[$i] = self::clamp_actor_slot([
+            'x' => $xs[$i] ?? (0.12 + (0.76 * ($i / max(1, $count - 1)))),
+            'y' => $is_lead ? 0.12 : 0.16,
+            'w' => $is_lead ? 0.23 : 0.18,
+            'h' => $is_lead ? 0.58 : 0.48,
+            'anchor' => 'top_center',
+            'opacity' => $is_lead ? 1.00 : 0.96,
+            'shadow' => $is_lead ? 0.68 : 0.56,
+            'role' => $role,
+            'z_index' => $is_lead ? 20 + $i : 5 + $i,
+        ], 'banner');
+    }
+
+    return $slots;
+}
+
+private static function clamp_actor_slot($slot, $variant) {
+    if (!is_array($slot)) $slot = [];
+    $slot['x'] = isset($slot['x']) ? (float)$slot['x'] : 0.50;
+    $slot['y'] = isset($slot['y']) ? (float)$slot['y'] : 0.12;
+    $slot['w'] = isset($slot['w']) ? (float)$slot['w'] : 0.20;
+    $slot['h'] = isset($slot['h']) ? (float)$slot['h'] : 0.50;
+
+    if ($variant === 'banner') {
+        $safe_left = 0.08;
+        $safe_right = 0.92;
+        $safe_top = 0.10;
+        $safe_bottom = 0.76;
+
+        $slot['w'] = max(0.10, min(0.32, $slot['w']));
+        $slot['h'] = max(0.28, min(0.64, $slot['h']));
+        $slot['y'] = max($safe_top, $slot['y']);
+
+        if ($slot['y'] + $slot['h'] > $safe_bottom) {
+            $slot['h'] = max(0.24, $safe_bottom - $slot['y']);
+        }
+
+        $half_w = $slot['w'] / 2;
+        $slot['x'] = max($safe_left + $half_w, min($safe_right - $half_w, $slot['x']));
+        $slot['bottom'] = min($safe_bottom, $slot['y'] + $slot['h']);
+        $slot['anchor'] = 'top_center';
+        return $slot;
+    }
+
+    $slot['x'] = max(0.04, min(0.96, $slot['x']));
+    $slot['y'] = max(0.02, min(0.90, $slot['y']));
+    $slot['w'] = max(0.10, min(0.70, $slot['w']));
+    $slot['h'] = max(0.10, min(0.86, $slot['h']));
+    $slot['bottom'] = min(0.92, $slot['y'] + $slot['h']);
+    return $slot;
+}
+
 
 private static function actor_text_has($text, $needles) {
     foreach ($needles as $needle) {
@@ -2047,6 +2111,7 @@ private static function composite_prepared_actor_layers($background_path, $layer
         }
 
         $slot = $slots[$local_i] ?? ['x' => 0.50, 'y' => 0.18, 'w' => 0.36, 'h' => 0.42, 'opacity' => 1.0, 'shadow' => 0.64, 'z_index' => $local_i + 1];
+        $slot = self::clamp_actor_slot($slot, $variant);
         $box_w = max(1, (int)round($canvas_w * (float)($slot['w'] ?? 0.34)));
         $box_h = max(1, (int)round($canvas_h * (float)($slot['h'] ?? 0.36)));
         $scale = min($box_w / max(1, $actor_w), $box_h / max(1, $actor_h));
