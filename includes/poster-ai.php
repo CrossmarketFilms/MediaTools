@@ -1077,6 +1077,9 @@ private static function build_background_only_prompt($brief, $variant = '') {
     $prompt .= "STRICT BACKGROUND-ONLY RULES:\n";
     $prompt .= "- NO people, NO faces, NO human silhouettes, NO characters, NO actors, NO bodies.\n";
     $prompt .= "- Do not create people, actors, faces, bodies, silhouettes, crowds, reflections of people, portraits, statues, masks, mannequins, ghosts, or human-like figures.\n";
+    $prompt .= "- Do not create floating heads, bust portraits, background cast, shadow people, crowd texture, human-shaped smoke, or human-like reflections.\n";
+    $prompt .= "- If the scene direction mentions Actor 1, Actor 2, cast, father, mother, daughter, lead, supporting, or any character placement, convert that into EMPTY reserved space only.\n";
+    $prompt .= "- The background plate will be rejected if any human face, head, body, figure, silhouette, statue, portrait, or person-like form appears.\n";
     $prompt .= "- Do not render the movie title, tagline, credits, logos, captions, signs, readable text, or typography.\n";
     $prompt .= "- Leave clean visual space for actor layers and final title typography that will be composited later by the plugin.\n";
     $prompt .= "- The result must be a people-free cinematic background plate only.\n";
@@ -1508,6 +1511,7 @@ private static function generate_background_plate_only($brief, $variant, $openai
             return $out_path;
         }
 
+        error_log('CMSG LAYERED BACKGROUND HUMAN CONTENT DETECTED variant=' . $variant . ' attempt=' . intval($attempt) . ' result=' . wp_json_encode($validation));
         error_log('CMSG LAYERED BACKGROUND REJECTED: human_detected variant=' . $variant . ' attempt=' . intval($attempt) . ' result=' . wp_json_encode($validation));
         @unlink($out_path);
     }
@@ -1515,15 +1519,60 @@ private static function generate_background_plate_only($brief, $variant, $openai
     return '';
 }
 
+private static function background_validation_input_path($background_path) {
+    if (!is_string($background_path) || $background_path === '') return '';
+    return preg_replace('/\.png$/i', '-background-validation-input.png', $background_path);
+}
+
+private static function background_validation_report_path($background_path) {
+    if (!is_string($background_path) || $background_path === '') return '';
+    return preg_replace('/\.png$/i', '-background-validation.json', $background_path);
+}
+
+private static function write_background_validation_report($background_path, $report) {
+    if (!is_array($report)) $report = [];
+    $report = array_merge([
+        'ok' => false,
+        'faces_detected' => 0,
+        'people_detected' => 0,
+        'silhouettes_detected' => 0,
+        'reason' => '',
+        'created_at' => gmdate('c'),
+    ], $report);
+
+    $input_path = self::background_validation_input_path($background_path);
+    if ($input_path && is_string($background_path) && file_exists($background_path)) {
+        @copy($background_path, $input_path);
+        @chmod($input_path, 0664);
+        $report['validation_input'] = $input_path;
+    }
+
+    $report_path = self::background_validation_report_path($background_path);
+    if ($report_path) {
+        file_put_contents($report_path, wp_json_encode($report, JSON_PRETTY_PRINT));
+        @chmod($report_path, 0664);
+        $report['report_path'] = $report_path;
+    }
+
+    return $report;
+}
+
 private static function validate_background_has_no_people($background_path, $brief) {
     if (!is_string($background_path) || !file_exists($background_path)) {
-        return ['ok' => false, 'reason' => 'missing_background'];
+        return self::write_background_validation_report($background_path, [
+            'ok' => false,
+            'reason' => 'missing_background',
+        ]);
     }
 
     $script = plugin_dir_path(dirname(__FILE__)) . 'tools/detect-duplicate-faces.py';
     if (!file_exists($script)) {
-        error_log('CMSG LAYERED BACKGROUND VALIDATION SKIPPED: face_detector_missing path=' . $script);
-        return ['ok' => true, 'reason' => 'detector_missing_skip'];
+        error_log('CMSG LAYERED BACKGROUND VALIDATION FAILED CLOSED: face_detector_missing path=' . $script);
+        return self::write_background_validation_report($background_path, [
+            'ok' => false,
+            'reason' => 'face_detector_missing',
+            'detector_path' => $script,
+        ]);
     }
 
     $python = file_exists('/opt/cmsg-bgremove/bin/python') ? '/opt/cmsg-bgremove/bin/python' : 'python3';
@@ -1537,37 +1586,89 @@ private static function validate_background_has_no_people($background_path, $bri
     $decoded = json_decode(trim((string)$raw), true);
 
     if (!is_array($decoded) || empty($decoded['ok'])) {
-        return ['ok' => true, 'reason' => 'detector_unavailable_skip', 'raw' => is_string($raw) ? substr($raw, 0, 500) : ''];
+        error_log('CMSG LAYERED BACKGROUND VALIDATION FAILED CLOSED: face_detector_unavailable raw=' . (is_string($raw) ? substr($raw, 0, 300) : ''));
+        return self::write_background_validation_report($background_path, [
+            'ok' => false,
+            'reason' => 'face_detector_unavailable',
+            'detector_path' => $script,
+            'raw' => is_string($raw) ? substr($raw, 0, 1000) : '',
+            'decoded' => is_array($decoded) ? $decoded : null,
+        ]);
     }
 
     $face_count = (int)($decoded['face_count'] ?? ($decoded['detected_face_count'] ?? 0));
     if ($face_count > 0) {
-        return ['ok' => false, 'reason' => 'face_detected', 'face_count' => $face_count, 'detector' => $decoded['method'] ?? 'unknown'];
+        error_log('CMSG LAYERED BACKGROUND HUMAN CONTENT DETECTED faces=' . $face_count . ' path=' . $background_path);
+        return self::write_background_validation_report($background_path, [
+            'ok' => false,
+            'reason' => 'face_detected',
+            'faces_detected' => $face_count,
+            'people_detected' => 0,
+            'silhouettes_detected' => 0,
+            'detector' => $decoded['method'] ?? 'unknown',
+            'face_detector' => $decoded,
+        ]);
     }
 
     $person_script = plugin_dir_path(dirname(__FILE__)) . 'tools/detect-people.py';
-    if (file_exists($person_script)) {
-        $person_cmd = escapeshellcmd($python)
-            . ' ' . escapeshellarg($person_script)
-            . ' ' . escapeshellarg($background_path)
-            . ' 2>&1';
-        $person_raw = shell_exec($person_cmd);
-        $person_decoded = json_decode(trim((string)$person_raw), true);
-        if (is_array($person_decoded) && !empty($person_decoded['ok'])) {
-            $person_count = (int)($person_decoded['person_count'] ?? 0);
-            $silhouette_count = (int)($person_decoded['silhouette_count'] ?? 0);
-            if ($person_count > 0 || $silhouette_count > 0) {
-                return [
-                    'ok' => false,
-                    'reason' => 'person_or_silhouette_detected',
-                    'person_count' => $person_count,
-                    'silhouette_count' => $silhouette_count,
-                ];
-            }
-        }
+    if (!file_exists($person_script)) {
+        error_log('CMSG LAYERED BACKGROUND VALIDATION FAILED CLOSED: people_detector_missing path=' . $person_script);
+        return self::write_background_validation_report($background_path, [
+            'ok' => false,
+            'reason' => 'people_detector_missing',
+            'faces_detected' => 0,
+            'people_detected' => 0,
+            'silhouettes_detected' => 0,
+            'face_detector' => $decoded,
+            'detector_path' => $person_script,
+        ]);
     }
 
-    return ['ok' => true, 'reason' => 'no_faces_detected', 'detector' => $decoded['method'] ?? 'unknown'];
+    $person_cmd = escapeshellcmd($python)
+        . ' ' . escapeshellarg($person_script)
+        . ' ' . escapeshellarg($background_path)
+        . ' 2>&1';
+    $person_raw = shell_exec($person_cmd);
+    $person_decoded = json_decode(trim((string)$person_raw), true);
+    if (!is_array($person_decoded) || empty($person_decoded['ok'])) {
+        error_log('CMSG LAYERED BACKGROUND VALIDATION FAILED CLOSED: people_detector_unavailable raw=' . (is_string($person_raw) ? substr($person_raw, 0, 300) : ''));
+        return self::write_background_validation_report($background_path, [
+            'ok' => false,
+            'reason' => 'people_detector_unavailable',
+            'faces_detected' => 0,
+            'people_detected' => 0,
+            'silhouettes_detected' => 0,
+            'face_detector' => $decoded,
+            'raw' => is_string($person_raw) ? substr($person_raw, 0, 1000) : '',
+            'decoded' => is_array($person_decoded) ? $person_decoded : null,
+        ]);
+    }
+
+    $person_count = (int)($person_decoded['person_count'] ?? ($person_decoded['people_detected'] ?? 0));
+    $silhouette_count = (int)($person_decoded['silhouette_count'] ?? ($person_decoded['silhouettes_detected'] ?? 0));
+    if ($person_count > 0 || $silhouette_count > 0) {
+        error_log('CMSG LAYERED BACKGROUND HUMAN CONTENT DETECTED people=' . $person_count . ' silhouettes=' . $silhouette_count . ' path=' . $background_path);
+        return self::write_background_validation_report($background_path, [
+            'ok' => false,
+            'reason' => 'person_or_silhouette_detected',
+            'faces_detected' => 0,
+            'people_detected' => $person_count,
+            'silhouettes_detected' => $silhouette_count,
+            'face_detector' => $decoded,
+            'people_detector' => $person_decoded,
+        ]);
+    }
+
+    return self::write_background_validation_report($background_path, [
+        'ok' => true,
+        'reason' => 'no_human_content_detected',
+        'faces_detected' => 0,
+        'people_detected' => 0,
+        'silhouettes_detected' => 0,
+        'face_detector' => $decoded,
+        'people_detector' => $person_decoded,
+        'detector' => $decoded['method'] ?? 'unknown',
+    ]);
 }
 
 private static function prepare_campaign_actor_cutouts($brief, $layer_dir) {
