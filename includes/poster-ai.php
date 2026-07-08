@@ -1796,54 +1796,242 @@ private static function validate_campaign_manifest_layer_uniqueness($manifest) {
     return true;
 }
 
-private static function composite_layered_campaign($manifest, $out_path) {
-    if (!is_array($manifest) || empty($out_path)) return false;
-    if (!self::validate_campaign_manifest_layer_uniqueness($manifest)) return false;
-    $background_path = '';
-    $actor_layers = [];
-    $slots = [];
-    $seen = [];
-    $variant_slots = self::campaign_slots_from_manifest($manifest, 'vertical');
-
+private static function campaign_background_path_from_manifest($manifest) {
     foreach ((array)($manifest['layers'] ?? []) as $layer) {
         if (($layer['type'] ?? '') === 'background') {
-            $background_path = (string)($layer['path'] ?? '');
-        } elseif (($layer['type'] ?? '') === 'actor') {
-            $actor_index = (int)($layer['actor_index'] ?? count($actor_layers));
-            $actor_id = sanitize_key($layer['actor_id'] ?? self::campaign_actor_id($actor_index));
-            if (isset($seen[$actor_id])) {
-                error_log('CMSG LAYERED DUPLICATE ACTOR SKIPPED: actor_id=' . $actor_id . ' actor_index=' . $actor_index);
-                continue;
-            }
-            $seen[$actor_id] = true;
-            $actor_layers[] = [
-                'index' => $actor_index,
-                'label' => $layer['actor_label'] ?? self::actor_layer_label($actor_index),
+            return (string)($layer['path'] ?? '');
+        }
+    }
+    return '';
+}
+
+private static function unique_campaign_actor_layers($manifest, $variant) {
+    $variant = sanitize_key($variant ?: 'vertical');
+    $layers = [];
+    $seen_actor_ids = [];
+    $seen_actor_indexes = [];
+    $seen_layer_paths = [];
+
+    foreach ((array)($manifest['layers'] ?? []) as $layer) {
+        if (($layer['type'] ?? '') !== 'actor') continue;
+
+        $actor_index = (int)($layer['actor_index'] ?? -1);
+        $actor_id = sanitize_key($layer['actor_id'] ?? self::campaign_actor_id($actor_index));
+        $layer_path = (string)($layer['layer_path'] ?? '');
+        $cutout_path = (string)($layer['cutout_path'] ?? '');
+        $render_path = ($layer_path !== '' && file_exists($layer_path)) ? $layer_path : $cutout_path;
+
+        if ($actor_id === '' || $actor_index < 0 || $render_path === '' || !file_exists($render_path)) {
+            error_log('CMSG LAYERED QUALITY FAIL: invalid_actor_layer_for_render variant=' . $variant . ' actor_id=' . $actor_id . ' actor_index=' . $actor_index . ' layer=' . $render_path);
+            return [];
+        }
+
+        $real_layer = realpath($render_path);
+        $layer_key = $real_layer ? $real_layer : $render_path;
+        if (isset($seen_actor_ids[$actor_id])) {
+            error_log('CMSG LAYERED QUALITY FAIL: duplicate_render_actor_id variant=' . $variant . ' actor_id=' . $actor_id);
+            return [];
+        }
+        if (isset($seen_actor_indexes[$actor_index])) {
+            error_log('CMSG LAYERED QUALITY FAIL: duplicate_render_actor_index variant=' . $variant . ' actor_index=' . $actor_index);
+            return [];
+        }
+        if (isset($seen_layer_paths[$layer_key])) {
+            error_log('CMSG LAYERED QUALITY FAIL: duplicate_render_layer_path variant=' . $variant . ' layer=' . $render_path);
+            return [];
+        }
+
+        $seen_actor_ids[$actor_id] = true;
+        $seen_actor_indexes[$actor_index] = true;
+        $seen_layer_paths[$layer_key] = true;
+        $layers[] = [
+            'index' => $actor_index,
+            'actor_index' => $actor_index,
+            'label' => sanitize_text_field($layer['actor_label'] ?? self::actor_layer_label($actor_index)),
+            'actor_id' => $actor_id,
+            'source' => (string)($layer['source_path'] ?? ''),
+            'source_path' => (string)($layer['source_path'] ?? ''),
+            'cutout' => $cutout_path,
+            'cutout_path' => $cutout_path,
+            'layer' => $render_path,
+            'layer_path' => $render_path,
+            'fallback_used' => !empty($layer['fallback_used']),
+        ];
+    }
+
+    if (empty($layers)) {
+        error_log('CMSG LAYERED QUALITY FAIL: no_unique_actor_layers variant=' . $variant);
+    }
+
+    return $layers;
+}
+
+private static function unique_campaign_slots_for_variant($manifest, $variant, $actor_layers) {
+    $variant = sanitize_key($variant ?: 'vertical');
+    $manifest_slots = self::campaign_slots_from_manifest($manifest, $variant);
+    $slots = [];
+    $seen_slot_actor_ids = [];
+
+    foreach ((array)$actor_layers as $layer) {
+        $actor_index = (int)($layer['actor_index'] ?? ($layer['index'] ?? -1));
+        $actor_id = sanitize_key($layer['actor_id'] ?? self::campaign_actor_id($actor_index));
+        if ($actor_id === '' || $actor_index < 0) {
+            error_log('CMSG LAYERED QUALITY FAIL: invalid_slot_actor_identity variant=' . $variant . ' actor_id=' . $actor_id . ' actor_index=' . $actor_index);
+            return [];
+        }
+        if (isset($seen_slot_actor_ids[$actor_id])) {
+            error_log('CMSG LAYERED QUALITY FAIL: duplicate_render_actor_id variant=' . $variant . ' actor_id=' . $actor_id . ' during=slot_assignment');
+            return [];
+        }
+        $seen_slot_actor_ids[$actor_id] = true;
+
+        if (isset($manifest_slots[$actor_id])) {
+            $slot = $manifest_slots[$actor_id];
+            $slot['slot_key'] = $variant . ':' . $actor_id;
+        } else {
+            error_log('CMSG LAYERED SLOT FALLBACK: variant=' . $variant . ' actor_id=' . $actor_id . ' actor_index=' . $actor_index);
+            $slot = self::campaign_slot_from_layer([
                 'actor_id' => $actor_id,
-                'source' => $layer['source_path'] ?? '',
-                'cutout' => $layer['cutout_path'] ?? '',
-                'layer' => $layer['layer_path'] ?? '',
-                'fallback_used' => !empty($layer['fallback_used']),
-            ];
-            $slots[$actor_index] = $variant_slots[$actor_id] ?? self::campaign_slot_from_layer($layer);
+                'actor_label' => $layer['label'] ?? $actor_id,
+                'actor_index' => $actor_index,
+                'z' => $actor_index + 10,
+            ]);
+            $slot['slot_key'] = $variant . ':' . $actor_id . ':fallback';
+        }
+
+        $slot['actor_id'] = $actor_id;
+        $slot['actor_index'] = $actor_index;
+        $slots[$actor_index] = $slot;
+    }
+
+    if (count($slots) !== count($actor_layers)) {
+        error_log('CMSG LAYERED QUALITY FAIL: slot_count_mismatch variant=' . $variant . ' expected=' . count($actor_layers) . ' slots=' . count($slots));
+        return [];
+    }
+
+    return $slots;
+}
+
+private static function campaign_render_audit_init($manifest, $variant) {
+    return [
+        'variant' => sanitize_key($variant ?: 'vertical'),
+        'expected_actor_count' => 0,
+        'placed_actor_count' => 0,
+        'actors' => [],
+        'duplicates' => [],
+        'ok' => true,
+        'campaign_id' => sanitize_text_field($manifest['campaign_id'] ?? ''),
+        'created_at' => gmdate('c'),
+    ];
+}
+
+private static function campaign_render_audit_mark(&$audit, $actor_id, $actor_index, $layer_path, $slot_key, $source_path = '', $cutout_path = '', $z_index = 0, $slot = []) {
+    $actor_id = sanitize_key($actor_id ?: self::campaign_actor_id($actor_index));
+    $actor_index = (int)$actor_index;
+    $layer_path = (string)$layer_path;
+    $real_layer = ($layer_path !== '' && file_exists($layer_path)) ? realpath($layer_path) : '';
+    $layer_key = $real_layer ?: $layer_path;
+
+    foreach ($audit['actors'] as &$existing) {
+        if (($existing['actor_id'] ?? '') === $actor_id || (int)($existing['actor_index'] ?? -1) === $actor_index || (($existing['layer_key'] ?? '') !== '' && ($existing['layer_key'] ?? '') === $layer_key)) {
+            $existing['render_count'] = (int)($existing['render_count'] ?? 1) + 1;
+            if (($existing['actor_id'] ?? '') === $actor_id) {
+                $audit['duplicates'][] = ['type' => 'duplicate_render_actor_id', 'actor_id' => $actor_id, 'actor_index' => $actor_index, 'layer_path' => $layer_path];
+            }
+            if ((int)($existing['actor_index'] ?? -1) === $actor_index) {
+                $audit['duplicates'][] = ['type' => 'duplicate_render_actor_index', 'actor_id' => $actor_id, 'actor_index' => $actor_index, 'layer_path' => $layer_path];
+            }
+            if (($existing['layer_key'] ?? '') !== '' && ($existing['layer_key'] ?? '') === $layer_key) {
+                $audit['duplicates'][] = ['type' => 'duplicate_render_layer_path', 'actor_id' => $actor_id, 'actor_index' => $actor_index, 'layer_path' => $layer_path];
+            }
+            $audit['ok'] = false;
+            unset($existing);
+            return false;
+        }
+    }
+    unset($existing);
+
+    $audit['actors'][] = [
+        'actor_id' => $actor_id,
+        'actor_index' => $actor_index,
+        'source_path' => (string)$source_path,
+        'cutout_path' => (string)$cutout_path,
+        'layer_path' => $layer_path,
+        'layer_key' => $layer_key,
+        'slot_key' => sanitize_text_field((string)$slot_key),
+        'render_count' => 1,
+        'z_index' => (int)$z_index,
+        'slot' => $slot,
+    ];
+    $audit['placed_actor_count'] = count($audit['actors']);
+    return true;
+}
+
+private static function campaign_render_audit_validate($audit, $variant) {
+    $ok = !empty($audit['ok'])
+        && empty($audit['duplicates'])
+        && (int)($audit['expected_actor_count'] ?? 0) === (int)($audit['placed_actor_count'] ?? -1);
+
+    if (!$ok) {
+        foreach ((array)($audit['duplicates'] ?? []) as $duplicate) {
+            error_log('CMSG LAYERED QUALITY FAIL: ' . sanitize_key($duplicate['type'] ?? 'duplicate_render') . ' variant=' . sanitize_key($variant) . ' actor_id=' . sanitize_key($duplicate['actor_id'] ?? '') . ' actor_index=' . intval($duplicate['actor_index'] ?? -1) . ' layer=' . sanitize_text_field($duplicate['layer_path'] ?? ''));
+        }
+        if ((int)($audit['expected_actor_count'] ?? 0) !== (int)($audit['placed_actor_count'] ?? -1)) {
+            error_log('CMSG LAYERED QUALITY FAIL: render_count_mismatch variant=' . sanitize_key($variant) . ' expected=' . intval($audit['expected_actor_count'] ?? 0) . ' placed=' . intval($audit['placed_actor_count'] ?? -1));
         }
     }
 
-    if (!$background_path || !file_exists($background_path) || empty($actor_layers)) {
-        error_log('CMSG LAYERED QUALITY FAIL: composite_missing_layers background=' . $background_path . ' actor_layers=' . count($actor_layers));
+    return $ok;
+}
+
+private static function placement_audit_path($output_path) {
+    if (!is_string($output_path) || $output_path === '') return '';
+    return preg_replace('/\.png$/i', '-placement-audit.json', $output_path);
+}
+
+private static function write_campaign_render_audit($audit, $output_path) {
+    $path = self::placement_audit_path($output_path);
+    if (!$path) return false;
+    $audit['ok'] = self::campaign_render_audit_validate($audit, $audit['variant'] ?? '');
+    file_put_contents($path, wp_json_encode($audit, JSON_PRETTY_PRINT));
+    @chmod($path, 0664);
+    return file_exists($path) && filesize($path) > 0;
+}
+
+private static function composite_layered_campaign($manifest, $out_path) {
+    if (!is_array($manifest) || empty($out_path)) return false;
+    if (!self::validate_campaign_manifest_layer_uniqueness($manifest)) return false;
+    $variant = 'vertical';
+    $background_path = self::campaign_background_path_from_manifest($manifest);
+    $actor_layers = self::unique_campaign_actor_layers($manifest, $variant);
+    $slots = self::unique_campaign_slots_for_variant($manifest, $variant, $actor_layers);
+
+    if (!$background_path || !file_exists($background_path) || empty($actor_layers) || empty($slots)) {
+        error_log('CMSG LAYERED QUALITY FAIL: composite_missing_layers background=' . $background_path . ' actor_layers=' . count($actor_layers) . ' slots=' . count($slots));
         return false;
     }
 
     @copy($background_path, $out_path);
     @chmod($out_path, 0664);
     $composite_path = preg_replace('/\.png$/i', '-layered-composite.png', $out_path);
-    $placed = self::composite_prepared_actor_layers($out_path, $actor_layers, $slots, 'vertical', [], $composite_path);
+    $placed = self::composite_prepared_actor_layers($out_path, $actor_layers, $slots, $variant, [], $composite_path);
     if ((int)$placed !== count($actor_layers) || !file_exists($composite_path) || filesize($composite_path) <= 0) {
         error_log('CMSG LAYERED QUALITY FAIL: composite_placed_count expected=' . count($actor_layers) . ' placed=' . intval($placed));
         return false;
     }
 
+    $audit_path = self::placement_audit_path($composite_path);
+    if (!$audit_path || !file_exists($audit_path)) {
+        error_log('CMSG LAYERED QUALITY FAIL: missing_render_audit path=' . (string)$audit_path);
+        return false;
+    }
+    $audit = self::read_campaign_manifest_json($audit_path);
+    if (!self::campaign_render_audit_validate($audit, $variant)) {
+        return false;
+    }
+
     @copy($composite_path, $out_path);
+    @copy($audit_path, self::placement_audit_path($out_path));
     @chmod($out_path, 0664);
     error_log('CMSG LAYERED COMPOSITE COMPLETE: out=' . $out_path . ' placed=' . intval($placed));
     return true;
@@ -1859,45 +2047,17 @@ private static function adapt_layered_campaign_to_variant($campaign_master_path,
         ? $campaign_master_path
         : self::preview_family_path($campaign_master_path, $variant);
 
-    $background_path = '';
-    $actor_layers = [];
-    $variant_slots = self::campaign_slots_from_manifest($manifest, $variant);
-    $seen_actor_ids = [];
-    foreach ((array)($manifest['layers'] ?? []) as $layer) {
-        if (($layer['type'] ?? '') === 'background') {
-            $background_path = (string)($layer['path'] ?? '');
-        } elseif (($layer['type'] ?? '') === 'actor') {
-            $actor_index = (int)($layer['actor_index'] ?? count($actor_layers));
-            $actor_id = sanitize_key($layer['actor_id'] ?? self::campaign_actor_id($actor_index));
-            if (isset($seen_actor_ids[$actor_id])) {
-                error_log('CMSG LAYERED DUPLICATE ACTOR SKIPPED: variant=' . $variant . ' actor_id=' . $actor_id . ' actor_index=' . $actor_index);
-                continue;
-            }
-            $seen_actor_ids[$actor_id] = true;
-            $actor_layers[] = [
-                'index' => $actor_index,
-                'label' => $layer['actor_label'] ?? '',
-                'actor_id' => $actor_id,
-                'source' => $layer['source_path'] ?? '',
-                'cutout' => $layer['cutout_path'] ?? '',
-                'layer' => $layer['layer_path'] ?? '',
-                'fallback_used' => !empty($layer['fallback_used']),
-            ];
-        }
-    }
+    $background_path = self::campaign_background_path_from_manifest($manifest);
+    $actor_layers = self::unique_campaign_actor_layers($manifest, $variant);
+    $slots = self::unique_campaign_slots_for_variant($manifest, $variant, $actor_layers);
 
-    if (!$background_path || !file_exists($background_path) || empty($actor_layers)) {
-        error_log('CMSG LAYERED QUALITY FAIL: variant_missing_layers variant=' . $variant . ' background=' . $background_path . ' actor_layers=' . count($actor_layers));
+    if (!$background_path || !file_exists($background_path) || empty($actor_layers) || empty($slots)) {
+        error_log('CMSG LAYERED QUALITY FAIL: variant_missing_layers variant=' . $variant . ' background=' . $background_path . ' actor_layers=' . count($actor_layers) . ' slots=' . count($slots));
         return '';
     }
 
     @copy($background_path, $out_path);
     self::resize_png_cover_no_overlay($out_path, $out_path, $target_w, $target_h);
-    $slots = [];
-    foreach ($actor_layers as $layer) {
-        $actor_id = sanitize_key($layer['actor_id'] ?? self::campaign_actor_id((int)($layer['index'] ?? 0)));
-        $slots[(int)($layer['index'] ?? 0)] = $variant_slots[$actor_id] ?? self::campaign_slot_from_layer($layer);
-    }
     $composite_path = preg_replace('/\.png$/i', '-layered-' . $variant . '-composite.png', $out_path);
     $placed = self::composite_prepared_actor_layers($out_path, $actor_layers, $slots, $variant, [], $composite_path);
     if ((int)$placed !== count($actor_layers) || !file_exists($composite_path) || filesize($composite_path) <= 0) {
@@ -1905,7 +2065,18 @@ private static function adapt_layered_campaign_to_variant($campaign_master_path,
         return '';
     }
 
+    $audit_path = self::placement_audit_path($composite_path);
+    if (!$audit_path || !file_exists($audit_path)) {
+        error_log('CMSG LAYERED QUALITY FAIL: missing_variant_render_audit variant=' . $variant . ' path=' . (string)$audit_path);
+        return '';
+    }
+    $audit = self::read_campaign_manifest_json($audit_path);
+    if (!self::campaign_render_audit_validate($audit, $variant)) {
+        return '';
+    }
+
     @copy($composite_path, $out_path);
+    @copy($audit_path, self::placement_audit_path($out_path));
     @chmod($out_path, 0664);
     error_log('CMSG LAYERED VARIANT RENDERED: variant=' . $variant . ' out=' . $out_path . ' placed=' . intval($placed));
     return $out_path;
@@ -2795,6 +2966,11 @@ private static function composite_prepared_actor_layers($background_path, $layer
     if (!function_exists('imagecreatefrompng') || !function_exists('imagecopyresampled')) return 0;
     if (!file_exists($background_path) || empty($layers)) return 0;
 
+    $variant = sanitize_key($variant ?: 'vertical');
+    $expected_actor_count = count($layers);
+    $audit = self::campaign_render_audit_init(is_array($brief) ? $brief : [], $variant);
+    $audit['expected_actor_count'] = $expected_actor_count;
+
     $canvas = @imagecreatefrompng($background_path);
     if (!$canvas) return 0;
 
@@ -2815,15 +2991,38 @@ private static function composite_prepared_actor_layers($background_path, $layer
 
     $placement_report = [];
     $placed_indexes = [];
+    $placed_actor_ids = [];
+    $placed_layer_paths = [];
+    $duplicate_detected = false;
     foreach (array_values($layers) as $layer_info) {
-        $local_i = (int)($layer_info['index'] ?? 0);
+        $local_i = (int)($layer_info['actor_index'] ?? ($layer_info['index'] ?? 0));
+        $actor_id = sanitize_key($layer_info['actor_id'] ?? self::campaign_actor_id($local_i));
         if (isset($placed_indexes[$local_i])) {
             error_log('CMSG DUPLICATE ACTOR CHECK: duplicate_layer_index_skipped index=' . $local_i . ' layer=' . ($layer_info['layer'] ?? ''));
+            $audit['duplicates'][] = ['type' => 'duplicate_render_actor_index', 'actor_id' => $actor_id, 'actor_index' => $local_i, 'layer_path' => (string)($layer_info['layer'] ?? '')];
+            $audit['ok'] = false;
+            $duplicate_detected = true;
+            continue;
+        }
+        if (isset($placed_actor_ids[$actor_id])) {
+            error_log('CMSG DUPLICATE ACTOR CHECK: duplicate_actor_id_skipped actor_id=' . $actor_id . ' index=' . $local_i . ' layer=' . ($layer_info['layer'] ?? ''));
+            $audit['duplicates'][] = ['type' => 'duplicate_render_actor_id', 'actor_id' => $actor_id, 'actor_index' => $local_i, 'layer_path' => (string)($layer_info['layer'] ?? '')];
+            $audit['ok'] = false;
+            $duplicate_detected = true;
             continue;
         }
 
         $layer_path = $layer_info['layer'] ?? '';
         if (!$layer_path || !file_exists($layer_path)) continue;
+        $real_layer_path = realpath($layer_path);
+        $layer_key = $real_layer_path ? $real_layer_path : $layer_path;
+        if (isset($placed_layer_paths[$layer_key])) {
+            error_log('CMSG DUPLICATE ACTOR CHECK: duplicate_layer_path_skipped actor_id=' . $actor_id . ' index=' . $local_i . ' layer=' . $layer_path);
+            $audit['duplicates'][] = ['type' => 'duplicate_render_layer_path', 'actor_id' => $actor_id, 'actor_index' => $local_i, 'layer_path' => $layer_path];
+            $audit['ok'] = false;
+            $duplicate_detected = true;
+            continue;
+        }
 
         $actor = @imagecreatefrompng($layer_path);
         if (!$actor) continue;
@@ -2840,6 +3039,7 @@ private static function composite_prepared_actor_layers($background_path, $layer
 
         $slot = $slots[$local_i] ?? ['x' => 0.50, 'y' => 0.18, 'w' => 0.36, 'h' => 0.42, 'opacity' => 1.0, 'shadow' => 0.64, 'z_index' => $local_i + 1];
         $slot = self::clamp_actor_slot($slot, $variant);
+        $slot_key = sanitize_text_field((string)($slot['slot_key'] ?? ($variant . ':' . $actor_id)));
         $box_w = max(1, (int)round($canvas_w * (float)($slot['w'] ?? 0.34)));
         $box_h = max(1, (int)round($canvas_h * (float)($slot['h'] ?? 0.36)));
         $scale = min($box_w / max(1, $actor_w), $box_h / max(1, $actor_h));
@@ -2868,12 +3068,17 @@ private static function composite_prepared_actor_layers($background_path, $layer
 
         $placed++;
         $placed_indexes[$local_i] = true;
+        $placed_actor_ids[$actor_id] = true;
+        $placed_layer_paths[$layer_key] = true;
         $placement = [
             'actor' => $slot['actor_label'] ?? self::actor_layer_label($local_i),
+            'actor_id' => $actor_id,
             'index' => $local_i,
-            'source' => $layer_info['source'] ?? '',
-            'cutout' => $layer_info['cutout'] ?? '',
+            'actor_index' => $local_i,
+            'source' => $layer_info['source_path'] ?? ($layer_info['source'] ?? ''),
+            'cutout' => $layer_info['cutout_path'] ?? ($layer_info['cutout'] ?? ''),
             'layer' => $layer_path,
+            'slot_key' => $slot_key,
             'x' => $x,
             'y' => $y,
             'w' => $target_w,
@@ -2886,10 +3091,29 @@ private static function composite_prepared_actor_layers($background_path, $layer
             'fallback_used' => !empty($layer_info['fallback_used']),
         ];
         $placement_report[] = $placement;
+        self::campaign_render_audit_mark(
+            $audit,
+            $actor_id,
+            $local_i,
+            $layer_path,
+            $slot_key,
+            $placement['source'],
+            $placement['cutout'],
+            (int)$placement['z_index'],
+            $slot
+        );
         error_log('CMSG COMPOSITE PLACED ACTOR ' . ($placement['actor'] ?? '') . ' path=' . $layer_path . ' x=' . $x . ' y=' . $y . ' w=' . $target_w . ' h=' . $target_h . ' z=' . $placement['z_index']);
     }
 
-    if ($placed > 0) {
+    if ($duplicate_detected) {
+        $audit['ok'] = false;
+    }
+
+    $audit['placed_actor_count'] = $placed;
+    $audit_ok = self::campaign_render_audit_validate($audit, $variant);
+    self::write_campaign_render_audit($audit, $composite_path);
+
+    if ($audit_ok && $placed > 0) {
         imagefilter($canvas, IMG_FILTER_COLORIZE, 10, 4, -8, 0);
         imagepng($canvas, $composite_path, 6);
         @chmod($composite_path, 0664);
@@ -2900,6 +3124,9 @@ private static function composite_prepared_actor_layers($background_path, $layer
     if ($report_path && !empty($placement_report)) {
         file_put_contents($report_path, wp_json_encode($placement_report, JSON_PRETTY_PRINT));
         @chmod($report_path, 0664);
+    }
+    if (!$audit_ok) {
+        return -1;
     }
     return $placed;
 }
