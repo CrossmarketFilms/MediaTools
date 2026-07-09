@@ -1644,6 +1644,37 @@ private static function create_layered_campaign_master($brief, $draft_id, $varia
         return '';
     }
 
+    $campaign_layout = self::build_campaign_master_layout($manifest, $brief);
+    if (!self::validate_campaign_layout_actor_consistency($campaign_layout, $manifest)) {
+        error_log('CMSG CAMPAIGN LAYOUT INVALID campaign_id=' . $campaign_id);
+        return '';
+    }
+
+    $layout_path = self::campaign_layout_path($manifest_path);
+    $vertical_layout_path = self::campaign_layout_path($manifest_path, 'vertical');
+    $banner_layout_path = self::campaign_layout_path($manifest_path, 'banner');
+    $vertical_layout = self::transform_campaign_layout_for_variant($campaign_layout, 'vertical', 900, 1285);
+    $banner_layout = self::transform_campaign_layout_for_variant($campaign_layout, 'banner', 895, 504);
+
+    if (
+        !self::write_campaign_layout_json($campaign_layout, $layout_path)
+        || !self::write_campaign_layout_json($vertical_layout, $vertical_layout_path)
+        || !self::write_campaign_layout_json($banner_layout, $banner_layout_path)
+    ) {
+        error_log('CMSG CAMPAIGN LAYOUT INVALID reason=layout_write_failed campaign_id=' . $campaign_id);
+        return '';
+    }
+
+    $manifest['campaign_layout_path'] = $layout_path;
+    $manifest['campaign_layout_paths'] = [
+        'master' => $layout_path,
+        'vertical' => $vertical_layout_path,
+        'banner' => $banner_layout_path,
+    ];
+    $manifest['variant_layouts']['vertical']['actor_slots'] = self::campaign_layout_slots($vertical_layout, 'vertical');
+    $manifest['variant_layouts']['banner']['actor_slots'] = self::campaign_layout_slots($banner_layout, 'banner');
+    $manifest['typography_layout'] = $campaign_layout['typography'] ?? [];
+
     if (!self::write_campaign_manifest_json($manifest, $manifest_path)) {
         error_log('CMSG LAYERED QUALITY FAIL: manifest_write_failed campaign_id=' . $campaign_id . ' path=' . $manifest_path);
         return '';
@@ -1666,6 +1697,276 @@ private static function create_layered_campaign_master($brief, $draft_id, $varia
 private static function campaign_manifest_path($master_path) {
     if (!is_string($master_path) || $master_path === '') return '';
     return preg_replace('/\.png$/i', '-campaign-manifest.json', $master_path);
+}
+
+private static function campaign_layout_path($manifest_path, $variant = '') {
+    if (!is_string($manifest_path) || $manifest_path === '') return '';
+    $variant = sanitize_key($variant);
+    $suffix = $variant !== '' ? '-campaign-layout-' . $variant . '.json' : '-campaign-layout.json';
+    return preg_replace('/-campaign-manifest\.json$/', $suffix, $manifest_path);
+}
+
+private static function write_campaign_layout_json($layout, $path) {
+    if (!is_array($layout) || !is_string($path) || $path === '') return false;
+    file_put_contents($path, wp_json_encode($layout, JSON_PRETTY_PRINT));
+    @chmod($path, 0664);
+    return file_exists($path) && filesize($path) > 0;
+}
+
+private static function read_campaign_layout_json($path) {
+    if (!is_string($path) || $path === '' || !file_exists($path)) return [];
+    $decoded = json_decode((string)file_get_contents($path), true);
+    return is_array($decoded) ? $decoded : [];
+}
+
+private static function build_campaign_master_layout($manifest, $brief) {
+    $actors = [];
+    foreach ((array)($manifest['layers'] ?? []) as $layer) {
+        if (($layer['type'] ?? '') !== 'actor') continue;
+        $actor_id = sanitize_key($layer['actor_id'] ?? '');
+        if ($actor_id === '') continue;
+
+        $actors[$actor_id] = [
+            'actor_index' => (int)($layer['actor_index'] ?? 0),
+            'role' => sanitize_key($layer['role'] ?? ''),
+            'x' => (float)($layer['x'] ?? 0.50),
+            'y' => (float)($layer['y'] ?? 0.14),
+            'w' => (float)($layer['w'] ?? 0.42),
+            'h' => (float)($layer['h'] ?? 0.50),
+            'z' => (int)($layer['z'] ?? 30),
+            'anchor' => 'top_center',
+            'locked' => true,
+        ];
+    }
+
+    uasort($actors, function($a, $b) {
+        return (int)($a['actor_index'] ?? 0) <=> (int)($b['actor_index'] ?? 0);
+    });
+
+    $layout = [
+        'campaign_id' => sanitize_key($manifest['campaign_id'] ?? ''),
+        'source' => 'campaign_master_layout',
+        'base_aspect' => 'vertical',
+        'base_size' => ['w' => 900, 'h' => 1285],
+        'created_at' => gmdate('c'),
+        'layout' => sanitize_key($manifest['layout'] ?? self::poster_layout_key($brief)),
+        'actors' => $actors,
+        'props' => [],
+        'typography' => [
+            'title' => [
+                'anchor' => 'bottom_center',
+                'x' => 0.50,
+                'baseline' => 0.86,
+                'max_width' => 0.78,
+                'scale' => 1.00,
+                'locked' => true,
+            ],
+        ],
+        'safe_areas' => [
+            'vertical' => ['left' => 0.06, 'right' => 0.94, 'top' => 0.05, 'bottom' => 0.94],
+            'banner' => ['left' => 0.07, 'right' => 0.93, 'top' => 0.08, 'bottom' => 0.86],
+        ],
+    ];
+
+    $has_vehicle_reference = false;
+    foreach (self::normalized_poster_asset_references($brief) as $reference) {
+        if (($reference['type'] ?? '') === 'vehicle') {
+            $has_vehicle_reference = true;
+            break;
+        }
+    }
+
+    if ($has_vehicle_reference) {
+        $layout['props']['vehicle'] = [
+            'x' => 0.50,
+            'y' => 0.80,
+            'w' => 0.72,
+            'h' => 0.20,
+            'z' => 20,
+            'locked' => true,
+            'embedded' => true,
+        ];
+        error_log('CMSG CAMPAIGN LAYOUT PROP EMBEDDED vehicle campaign_id=' . sanitize_key($layout['campaign_id']));
+    }
+
+    error_log('CMSG CAMPAIGN LAYOUT BUILT campaign_id=' . sanitize_key($layout['campaign_id']) . ' actors=' . count($actors));
+    return $layout;
+}
+
+private static function validate_campaign_layout($layout) {
+    if (!is_array($layout) || ($layout['source'] ?? '') !== 'campaign_master_layout') return false;
+    if (empty($layout['actors']) || !is_array($layout['actors'])) return false;
+
+    $seen_indexes = [];
+    $seen_z = [];
+    foreach ($layout['actors'] as $actor_id => $actor) {
+        $actor_id = sanitize_key($actor_id);
+        $actor_index = (int)($actor['actor_index'] ?? -1);
+        if ($actor_id === '' || $actor_index < 0) return false;
+        if (isset($seen_indexes[$actor_index])) return false;
+        $seen_indexes[$actor_index] = true;
+
+        $z = (int)($actor['z'] ?? 0);
+        while (isset($seen_z[$z])) {
+            $z++;
+        }
+        $seen_z[$z] = true;
+    }
+
+    return true;
+}
+
+private static function validate_campaign_layout_actor_consistency($layout, $manifest) {
+    if (!self::validate_campaign_layout($layout)) {
+        error_log('CMSG CAMPAIGN LAYOUT INVALID reason=layout_schema');
+        return false;
+    }
+
+    $manifest_actor_ids = [];
+    foreach ((array)($manifest['layers'] ?? []) as $layer) {
+        if (($layer['type'] ?? '') !== 'actor') continue;
+        $actor_id = sanitize_key($layer['actor_id'] ?? '');
+        if ($actor_id === '') continue;
+        if (isset($manifest_actor_ids[$actor_id])) {
+            error_log('CMSG CAMPAIGN LAYOUT INVALID reason=duplicate_manifest_actor actor_id=' . $actor_id);
+            return false;
+        }
+        $manifest_actor_ids[$actor_id] = true;
+    }
+
+    $layout_actor_ids = [];
+    foreach ((array)($layout['actors'] ?? []) as $actor_id => $actor) {
+        $actor_id = sanitize_key($actor_id);
+        if ($actor_id === '') {
+            error_log('CMSG CAMPAIGN LAYOUT INVALID reason=empty_layout_actor');
+            return false;
+        }
+        if (isset($layout_actor_ids[$actor_id])) {
+            error_log('CMSG CAMPAIGN LAYOUT INVALID reason=duplicate_layout_actor actor_id=' . $actor_id);
+            return false;
+        }
+        if (!isset($manifest_actor_ids[$actor_id])) {
+            error_log('CMSG CAMPAIGN LAYOUT INVALID reason=layout_actor_not_in_manifest actor_id=' . $actor_id);
+            return false;
+        }
+        $layout_actor_ids[$actor_id] = true;
+    }
+
+    if (count($layout_actor_ids) !== count($manifest_actor_ids)) {
+        error_log('CMSG CAMPAIGN LAYOUT INVALID reason=actor_count_mismatch layout=' . count($layout_actor_ids) . ' manifest=' . count($manifest_actor_ids));
+        return false;
+    }
+
+    return true;
+}
+
+private static function transform_campaign_layout_for_variant($layout, $variant, $target_w, $target_h) {
+    if (!self::validate_campaign_layout($layout)) return [];
+
+    $variant = sanitize_key($variant ?: 'vertical');
+    $target_w = max(1, (int)$target_w);
+    $target_h = max(1, (int)$target_h);
+    $transformed = $layout;
+    $transformed['source'] = 'campaign_master_layout';
+    $transformed['variant'] = $variant;
+    $transformed['target_size'] = ['w' => $target_w, 'h' => $target_h];
+    $transformed['actors'] = [];
+
+    $actors = (array)($layout['actors'] ?? []);
+    uasort($actors, function($a, $b) {
+        $x_cmp = (float)($a['x'] ?? 0.5) <=> (float)($b['x'] ?? 0.5);
+        if ($x_cmp !== 0) return $x_cmp;
+        return (int)($a['actor_index'] ?? 0) <=> (int)($b['actor_index'] ?? 0);
+    });
+
+    $safe = $layout['safe_areas'][$variant] ?? ['left' => 0.06, 'right' => 0.94, 'top' => 0.05, 'bottom' => 0.94];
+    $safe_left = (float)($safe['left'] ?? 0.06);
+    $safe_right = (float)($safe['right'] ?? 0.94);
+    $safe_top = (float)($safe['top'] ?? 0.05);
+    $safe_bottom = (float)($safe['bottom'] ?? 0.94);
+    $count = count($actors);
+    $rank = 0;
+
+    foreach ($actors as $actor_id => $actor) {
+        $actor_id = sanitize_key($actor_id);
+        $base_x = (float)($actor['x'] ?? 0.50);
+        $base_y = (float)($actor['y'] ?? 0.14);
+        $base_w = (float)($actor['w'] ?? 0.42);
+        $base_h = (float)($actor['h'] ?? 0.50);
+
+        if ($variant === 'banner') {
+            $spread_x = $count > 1
+                ? $safe_left + (($safe_right - $safe_left) * ($rank / max(1, $count - 1)))
+                : 0.50;
+            $x = ($base_x * 0.35) + ($spread_x * 0.65);
+            $y = $safe_top + min(0.30, max(0.02, $base_y * 0.42));
+            $w = max(0.16, min(0.28, $base_w * 0.58));
+            $h = max(0.44, min(0.74, $base_h * 0.82));
+            if ($rank === 0) {
+                $x = max($safe_left + ($w / 2), $x);
+            } elseif ($rank === $count - 1) {
+                $x = min($safe_right - ($w / 2), $x);
+            }
+        } else {
+            $x = $base_x;
+            $y = $base_y;
+            $w = $base_w;
+            $h = $base_h;
+        }
+
+        $x = max($safe_left + ($w / 2), min($safe_right - ($w / 2), $x));
+        $y = max($safe_top, min($safe_bottom - min(0.22, $h * 0.34), $y));
+
+        $transformed['actors'][$actor_id] = array_merge($actor, [
+            'x' => $x,
+            'y' => $y,
+            'w' => $w,
+            'h' => $h,
+            'locked' => true,
+            'transform_source' => 'campaign_master_layout',
+        ]);
+        $rank++;
+    }
+
+    if (!empty($transformed['typography']['title'])) {
+        if ($variant === 'banner') {
+            $transformed['typography']['title']['baseline'] = 0.74;
+            $transformed['typography']['title']['max_width'] = 0.54;
+            $transformed['typography']['title']['scale'] = 0.84;
+        } else {
+            $transformed['typography']['title']['baseline'] = 0.86;
+            $transformed['typography']['title']['max_width'] = 0.78;
+            $transformed['typography']['title']['scale'] = 1.00;
+        }
+        error_log('CMSG CAMPAIGN LAYOUT TITLE variant=' . $variant . ' baseline=' . $transformed['typography']['title']['baseline'] . ' max_width=' . $transformed['typography']['title']['max_width']);
+    }
+
+    error_log('CMSG CAMPAIGN LAYOUT TRANSFORMED variant=' . $variant . ' actors=' . count($transformed['actors']) . ' target=' . $target_w . 'x' . $target_h);
+    return $transformed;
+}
+
+private static function campaign_layout_slots($layout, $variant) {
+    $slots = [];
+    foreach ((array)($layout['actors'] ?? []) as $actor_id => $actor) {
+        $actor_id = sanitize_key($actor_id);
+        if ($actor_id === '') continue;
+        $slots[$actor_id] = [
+            'actor_id' => $actor_id,
+            'actor_index' => (int)($actor['actor_index'] ?? 0),
+            'x' => (float)($actor['x'] ?? 0.50),
+            'y' => (float)($actor['y'] ?? 0.15),
+            'w' => (float)($actor['w'] ?? 0.36),
+            'h' => (float)($actor['h'] ?? 0.46),
+            'z_index' => (int)($actor['z'] ?? ((int)($actor['actor_index'] ?? 0) + 10)),
+            'role' => sanitize_key($actor['role'] ?? ''),
+            'anchor' => sanitize_key($actor['anchor'] ?? 'top_center'),
+            'opacity' => 1.0,
+            'shadow' => 0.68,
+            'locked' => true,
+            'slot_key' => sanitize_key($variant) . ':' . $actor_id . ':campaign_master_layout',
+        ];
+    }
+    return $slots;
 }
 
 private static function generate_background_plate_only($brief, $variant, $openai_size, $out_path) {
@@ -2019,6 +2320,27 @@ private static function campaign_variant_slot_map($brief, $count, $variant) {
 private static function campaign_slots_from_manifest($manifest, $variant) {
     $variant = sanitize_key($variant ?: 'vertical');
     $slots = [];
+    $layout_path = (string)($manifest['campaign_layout_paths'][$variant] ?? '');
+    $layout = self::read_campaign_layout_json($layout_path);
+    if (!empty($layout) && self::validate_campaign_layout($layout)) {
+        $slots = self::campaign_layout_slots($layout, $variant);
+        if (!empty($slots)) {
+            return $slots;
+        }
+    }
+
+    $master_layout_path = (string)($manifest['campaign_layout_path'] ?? ($manifest['campaign_layout_paths']['master'] ?? ''));
+    $master_layout = self::read_campaign_layout_json($master_layout_path);
+    if (!empty($master_layout) && self::validate_campaign_layout($master_layout)) {
+        $target = $variant === 'banner' ? ['w' => 895, 'h' => 504] : ['w' => 900, 'h' => 1285];
+        $layout = self::transform_campaign_layout_for_variant($master_layout, $variant, $target['w'], $target['h']);
+        $slots = self::campaign_layout_slots($layout, $variant);
+        if (!empty($slots)) {
+            return $slots;
+        }
+    }
+
+    error_log('CMSG CAMPAIGN LAYOUT FALLBACK variant=' . $variant . ' layout_path=' . sanitize_text_field($layout_path));
     $raw_slots = $manifest['variant_layouts'][$variant]['actor_slots'] ?? [];
     foreach ((array)$raw_slots as $actor_id => $slot) {
         if (!is_array($slot)) continue;
