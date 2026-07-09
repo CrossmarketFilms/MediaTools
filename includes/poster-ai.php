@@ -27,6 +27,7 @@ final class CMSG_Poster_AI {
                     'role' => $role,
                     'instruction' => sanitize_text_field($member['instruction'] ?? ''),
                     'image' => is_string($member['image'] ?? '') ? (string)$member['image'] : '',
+                    'source_type' => 'principal_cast',
                 ];
 
                 if ($row['name'] !== '' || $row['instruction'] !== '' || $row['image'] !== '') {
@@ -50,10 +51,174 @@ final class CMSG_Poster_AI {
                 'role' => $i <= 2 ? 'lead' : 'supporting',
                 'instruction' => $instruction,
                 'image' => $image,
+                'source_type' => 'legacy_cast',
             ];
         }
 
         return $members;
+    }
+
+    private static function actor_registry_path_key($path) {
+        if (!is_string($path) || $path === '') return '';
+        $real = file_exists($path) ? realpath($path) : false;
+        return $real ? $real : $path;
+    }
+
+    private static function actor_registry_source_type($type) {
+        $type = sanitize_key($type);
+        $allowed = ['principal_cast', 'legacy_cast', 'visual_reference', 'style_reference', 'prop_reference'];
+        return in_array($type, $allowed, true) ? $type : 'prop_reference';
+    }
+
+    private static function actor_registry_asset_type_to_source_type($type) {
+        $type = sanitize_key($type);
+        if ($type === 'style') return 'style_reference';
+        if (in_array($type, ['prop', 'logo', 'vehicle', 'building', 'product', 'symbol'], true)) {
+            return 'prop_reference';
+        }
+        return 'visual_reference';
+    }
+
+    private static function actor_source_registry($brief) {
+        $registry = [];
+        $accepted_seen = [];
+        $candidate_seen = [];
+        $actor_index = 0;
+
+        $add_candidate = function($path, $source_type, $source_key, $accepted, $rejected_reason = '') use (&$registry, &$accepted_seen, &$candidate_seen, &$actor_index) {
+            $source_type = self::actor_registry_source_type($source_type);
+            $path = is_string($path) ? $path : '';
+            $path_key = self::actor_registry_path_key($path);
+            $candidate_key = $source_type . '|' . $source_key . '|' . $path_key;
+
+            if ($path === '' || $path_key === '') {
+                return;
+            }
+
+            if (isset($candidate_seen[$candidate_key])) {
+                return;
+            }
+
+            $candidate_seen[$candidate_key] = true;
+            $file_exists = file_exists($path);
+            $can_be_actor = in_array($source_type, ['principal_cast', 'legacy_cast'], true);
+            $accepted_as_actor = (bool)$accepted && $can_be_actor && $file_exists && !isset($accepted_seen[$path_key]);
+            $reason = $rejected_reason;
+
+            if (!$can_be_actor && $reason === '') {
+                $reason = 'principal_cast_only';
+            } elseif (!$file_exists && $reason === '') {
+                $reason = 'missing_file';
+            } elseif ($accepted && isset($accepted_seen[$path_key]) && $reason === '') {
+                $reason = 'duplicate_actor_source';
+            }
+
+            $row_actor_index = $accepted_as_actor ? $actor_index : null;
+            $registry[] = [
+                'actor_id' => $accepted_as_actor ? self::campaign_actor_id($actor_index) : '',
+                'actor_index' => $row_actor_index,
+                'source_path' => $path,
+                'source_key' => sanitize_key($source_key),
+                'source_type' => $source_type,
+                'accepted_as_actor' => $accepted_as_actor,
+                'rejected_reason' => $accepted_as_actor ? '' : $reason,
+                'principal_cast_only' => true,
+            ];
+
+            if ($accepted_as_actor) {
+                $accepted_seen[$path_key] = true;
+                $actor_index++;
+            }
+        };
+
+        foreach (self::normalized_cast_members($brief) as $index => $member) {
+            $source_type = self::actor_registry_source_type($member['source_type'] ?? 'principal_cast');
+            if (!in_array($source_type, ['principal_cast', 'legacy_cast'], true)) {
+                $source_type = 'principal_cast';
+            }
+            $add_candidate($member['image'] ?? '', $source_type, 'cast_members_' . (int)$index . '_image', true);
+        }
+
+        foreach (['cast_actor_1', 'cast_actor_2', 'cast_actor_3'] as $key) {
+            $add_candidate($brief[$key] ?? '', 'legacy_cast', $key, true);
+        }
+
+        if (!empty($brief['style_reference'])) {
+            $add_candidate($brief['style_reference'], 'style_reference', 'style_reference', false, 'style_reference_not_actor');
+        }
+
+        foreach (self::normalized_poster_asset_references($brief) as $index => $reference) {
+            $source_type = self::actor_registry_asset_type_to_source_type($reference['type'] ?? 'prop');
+            $add_candidate($reference['image'] ?? '', $source_type, 'poster_asset_references_' . (int)$index, false, 'poster_asset_reference_not_actor');
+        }
+
+        if (!empty($brief['poster_assets']) && is_array($brief['poster_assets'])) {
+            foreach ($brief['poster_assets'] as $index => $asset) {
+                $path = '';
+                $source_type = 'prop_reference';
+                $explicit_actor = false;
+
+                if (is_array($asset)) {
+                    $path = is_string($asset['image'] ?? '') ? (string)$asset['image'] : (is_string($asset['path'] ?? '') ? (string)$asset['path'] : '');
+                    $declared = sanitize_key($asset['source_type'] ?? ($asset['type'] ?? ($asset['role'] ?? '')));
+                    $explicit_actor = in_array($declared, ['principal_cast', 'cast', 'actor', 'actor_reference'], true);
+                    $source_type = $explicit_actor ? 'principal_cast' : self::actor_registry_asset_type_to_source_type($declared);
+                } elseif (is_string($asset)) {
+                    $path = $asset;
+                }
+
+                $add_candidate(
+                    $path,
+                    $source_type,
+                    'poster_assets_' . (int)$index,
+                    $explicit_actor,
+                    $explicit_actor ? '' : 'poster_asset_not_actor'
+                );
+            }
+        }
+
+        return $registry;
+    }
+
+    private static function accepted_actor_source_records($brief_or_registry) {
+        if (!is_array($brief_or_registry)) {
+            return [];
+        }
+
+        $registry = is_array($brief_or_registry) && array_key_exists(0, $brief_or_registry) && isset($brief_or_registry[0]['source_type'])
+            ? $brief_or_registry
+            : self::actor_source_registry($brief_or_registry);
+        $records = [];
+
+        foreach ($registry as $row) {
+            if (empty($row['accepted_as_actor'])) continue;
+            if (!in_array($row['source_type'] ?? '', ['principal_cast', 'legacy_cast'], true)) continue;
+            $records[] = $row;
+        }
+
+        return $records;
+    }
+
+    private static function actor_registry_audit_path($manifest_path) {
+        if (!is_string($manifest_path) || $manifest_path === '') return '';
+        return preg_replace('/-campaign-manifest\.json$/', '-actor-registry-audit.json', $manifest_path);
+    }
+
+    private static function write_actor_registry_audit($manifest_path, $registry) {
+        $audit_path = self::actor_registry_audit_path($manifest_path);
+        if (!$audit_path) return false;
+
+        $payload = [
+            'created_at' => gmdate('c'),
+            'principal_cast_only' => true,
+            'accepted_actor_count' => count(self::accepted_actor_source_records($registry)),
+            'registry' => array_values((array)$registry),
+        ];
+
+        file_put_contents($audit_path, wp_json_encode($payload, JSON_PRETTY_PRINT));
+        @chmod($audit_path, 0664);
+        error_log('CMSG actor_registry_audit written path=' . $audit_path . ' accepted=' . intval($payload['accepted_actor_count']));
+        return true;
     }
 
     private static function normalized_poster_asset_references($brief) {
@@ -1430,7 +1595,15 @@ private static function create_layered_campaign_master($brief, $draft_id, $varia
     $variant = sanitize_key($variant ?: 'vertical');
     $out_path = self::preview_clean_file_path($draft_id, $variant, $index);
     $campaign_id = sanitize_key('draft-' . intval($draft_id) . '-' . $variant . '-' . intval($index) . '-' . substr(md5($out_path), 0, 10));
-    $cast_assets = self::cast_actor_assets($brief);
+    $layer_dir = self::identity_composite_layer_dir($out_path);
+    $background_path = trailingslashit($layer_dir) . 'background_base.png';
+    $manifest_path = self::campaign_manifest_path($out_path);
+    $actor_registry = self::actor_source_registry($brief);
+    self::write_actor_registry_audit($manifest_path, $actor_registry);
+    $cast_records = self::accepted_actor_source_records($actor_registry);
+    $cast_assets = array_values(array_map(function($row) {
+        return $row['source_path'] ?? '';
+    }, $cast_records));
 
     error_log('CMSG LAYERED CAMPAIGN START: campaign_id=' . $campaign_id . ' draft_id=' . intval($draft_id) . ' variant=' . $variant . ' cast_count=' . count($cast_assets));
 
@@ -1438,10 +1611,6 @@ private static function create_layered_campaign_master($brief, $draft_id, $varia
         error_log('CMSG LAYERED QUALITY FAIL: no_cast_assets campaign_id=' . $campaign_id);
         return '';
     }
-
-    $layer_dir = self::identity_composite_layer_dir($out_path);
-    $background_path = trailingslashit($layer_dir) . 'background_base.png';
-    $manifest_path = self::campaign_manifest_path($out_path);
 
     $background = self::generate_background_plate_only($brief, $variant, '1024x1536', $background_path);
     if (!$background) {
@@ -1451,13 +1620,18 @@ private static function create_layered_campaign_master($brief, $draft_id, $varia
 
     self::resize_png_cover_no_overlay($background, $background, 900, 1285);
 
-    $actor_layers = self::prepare_campaign_actor_cutouts($brief, $layer_dir);
+    $actor_layers = self::prepare_campaign_actor_cutouts($brief, $layer_dir, $cast_records);
     if (count($actor_layers) !== count($cast_assets)) {
         error_log('CMSG LAYERED QUALITY FAIL: actor_layer_count_mismatch campaign_id=' . $campaign_id . ' expected=' . count($cast_assets) . ' prepared=' . count($actor_layers));
         return '';
     }
 
     $manifest = self::build_campaign_layer_manifest($brief, $background, $actor_layers, $variant);
+    if (empty($manifest) || empty($manifest['layers'])) {
+        error_log('CMSG LAYERED QUALITY FAIL: manifest_actor_registry_empty campaign_id=' . $campaign_id);
+        return '';
+    }
+
     $manifest['campaign_id'] = $campaign_id;
     $manifest['master'] = [
         'path' => $out_path,
@@ -1671,11 +1845,19 @@ private static function validate_background_has_no_people($background_path, $bri
     ]);
 }
 
-private static function prepare_campaign_actor_cutouts($brief, $layer_dir) {
-    $assets = self::cast_actor_assets($brief);
-    $layers = self::prepare_identity_actor_layers($assets, $layer_dir);
+private static function prepare_campaign_actor_cutouts($brief, $layer_dir, $actor_records = null) {
+    $records = is_array($actor_records) ? $actor_records : self::accepted_actor_source_records($brief);
+
+    foreach ($records as $record) {
+        if (empty($record['accepted_as_actor']) || !in_array($record['source_type'] ?? '', ['principal_cast', 'legacy_cast'], true)) {
+            error_log('CMSG LAYERED QUALITY FAIL: non_cast_asset_in_actor_registry source_type=' . sanitize_text_field($record['source_type'] ?? '') . ' path=' . sanitize_text_field($record['source_path'] ?? ''));
+            return [];
+        }
+    }
+
+    $layers = self::prepare_identity_actor_layers($records, $layer_dir);
     foreach ($layers as $layer) {
-        error_log('CMSG LAYERED ACTOR CUTOUT: actor=' . sanitize_text_field($layer['label'] ?? '') . ' source=' . sanitize_text_field($layer['source'] ?? '') . ' layer=' . sanitize_text_field($layer['layer'] ?? '') . ' fallback=' . (!empty($layer['fallback_used']) ? 'yes' : 'no'));
+        error_log('CMSG LAYERED ACTOR CUTOUT: actor=' . sanitize_text_field($layer['label'] ?? '') . ' source_type=' . sanitize_text_field($layer['source_type'] ?? '') . ' source=' . sanitize_text_field($layer['source'] ?? '') . ' layer=' . sanitize_text_field($layer['layer'] ?? '') . ' fallback=' . (!empty($layer['fallback_used']) ? 'yes' : 'no'));
     }
     return $layers;
 }
@@ -1752,6 +1934,12 @@ private static function build_campaign_layer_manifest($brief, $background_path, 
 
     $seen_indexes = [];
     foreach (array_values($actor_layers) as $i => $layer) {
+        $source_type = self::actor_registry_source_type($layer['source_type'] ?? 'legacy_cast');
+        if (empty($layer['accepted_as_actor']) || !in_array($source_type, ['principal_cast', 'legacy_cast'], true)) {
+            error_log('CMSG LAYERED QUALITY FAIL: non_cast_asset_in_actor_registry source_type=' . sanitize_text_field($source_type) . ' path=' . sanitize_text_field($layer['source'] ?? ''));
+            return [];
+        }
+
         $actor_index = (int)($layer['index'] ?? $i);
         if (isset($seen_indexes[$actor_index])) {
             error_log('CMSG LAYERED DUPLICATE ACTOR SKIPPED: actor_index=' . $actor_index . ' layer=' . sanitize_text_field($layer['layer'] ?? ''));
@@ -1766,6 +1954,9 @@ private static function build_campaign_layer_manifest($brief, $background_path, 
             'actor_index' => $actor_index,
             'actor_label' => self::actor_layer_label($actor_index),
             'source_path' => $layer['source'] ?? '',
+            'source_type' => $source_type,
+            'accepted_as_actor' => true,
+            'principal_cast_only' => true,
             'source_hash' => self::campaign_file_hash($layer['source'] ?? ''),
             'cutout_path' => $layer['cutout'] ?? '',
             'layer_path' => $layer['layer'] ?? '',
@@ -1871,6 +2062,12 @@ private static function validate_campaign_manifest_layer_uniqueness($manifest) {
     foreach ((array)($manifest['layers'] ?? []) as $layer) {
         if (($layer['type'] ?? '') !== 'actor') continue;
         $actor_count++;
+        $source_type = self::actor_registry_source_type($layer['source_type'] ?? '');
+        if (empty($layer['accepted_as_actor']) || !in_array($source_type, ['principal_cast', 'legacy_cast'], true)) {
+            error_log('CMSG LAYERED QUALITY FAIL: non_cast_asset_in_actor_registry source_type=' . sanitize_text_field($source_type) . ' actor_id=' . sanitize_text_field($layer['actor_id'] ?? '') . ' path=' . sanitize_text_field($layer['source_path'] ?? ''));
+            return false;
+        }
+
         $actor_index = (int)($layer['actor_index'] ?? -1);
         $actor_id = sanitize_key($layer['actor_id'] ?? self::campaign_actor_id($actor_index));
         if ($actor_id === '' || $actor_index < 0) {
@@ -1921,6 +2118,12 @@ private static function unique_campaign_actor_layers($manifest, $variant) {
         $layer_path = (string)($layer['layer_path'] ?? '');
         $cutout_path = (string)($layer['cutout_path'] ?? '');
         $render_path = ($layer_path !== '' && file_exists($layer_path)) ? $layer_path : $cutout_path;
+        $source_type = self::actor_registry_source_type($layer['source_type'] ?? '');
+
+        if (empty($layer['accepted_as_actor']) || !in_array($source_type, ['principal_cast', 'legacy_cast'], true)) {
+            error_log('CMSG LAYERED QUALITY FAIL: non_cast_asset_in_actor_registry variant=' . $variant . ' source_type=' . sanitize_text_field($source_type) . ' actor_id=' . $actor_id . ' path=' . sanitize_text_field($layer['source_path'] ?? ''));
+            return [];
+        }
 
         if ($actor_id === '' || $actor_index < 0 || $render_path === '' || !file_exists($render_path)) {
             error_log('CMSG LAYERED QUALITY FAIL: invalid_actor_layer_for_render variant=' . $variant . ' actor_id=' . $actor_id . ' actor_index=' . $actor_index . ' layer=' . $render_path);
@@ -1952,6 +2155,9 @@ private static function unique_campaign_actor_layers($manifest, $variant) {
             'actor_id' => $actor_id,
             'source' => (string)($layer['source_path'] ?? ''),
             'source_path' => (string)($layer['source_path'] ?? ''),
+            'source_type' => $source_type,
+            'accepted_as_actor' => true,
+            'principal_cast_only' => true,
             'cutout' => $cutout_path,
             'cutout_path' => $cutout_path,
             'layer' => $render_path,
@@ -2074,6 +2280,9 @@ private static function campaign_actor_placement_map($manifest, $variant) {
             'actor_index' => $actor_index,
             'label' => sanitize_text_field($layer['label'] ?? self::actor_layer_label($actor_index)),
             'source_path' => (string)($layer['source_path'] ?? ($layer['source'] ?? '')),
+            'source_type' => self::actor_registry_source_type($layer['source_type'] ?? 'legacy_cast'),
+            'accepted_as_actor' => true,
+            'principal_cast_only' => true,
             'cutout_path' => (string)($layer['cutout_path'] ?? ($layer['cutout'] ?? '')),
             'layer_path' => $layer_path,
             'layer_key' => $layer_key,
@@ -2386,31 +2595,11 @@ error_log('CMSG CAST FACE MAP CHECK: cast1=' . ($brief['cast_actor_1'] ?? 'none'
 
 private static function cast_actor_assets($brief) {
     $assets = [];
-    $seen = [];
-    $add_asset = function($path) use (&$assets, &$seen) {
-        if (!is_string($path) || $path === '' || !file_exists($path)) {
-            return;
+    foreach (self::accepted_actor_source_records($brief) as $record) {
+        if (!empty($record['source_path'])) {
+            $assets[] = $record['source_path'];
         }
-
-        $real = realpath($path);
-        $key = $real ? $real : $path;
-
-        if (isset($seen[$key])) {
-            return;
-        }
-
-        $seen[$key] = true;
-        $assets[] = $path;
-    };
-
-    foreach (self::normalized_cast_members($brief) as $member) {
-        $add_asset($member['image'] ?? '');
     }
-
-    foreach (['cast_actor_1', 'cast_actor_2', 'cast_actor_3'] as $key) {
-        $add_asset($brief[$key] ?? '');
-    }
-
     return $assets;
 }
 
@@ -2807,7 +2996,24 @@ private static function png_has_transparency($path) {
 private static function prepare_identity_actor_layers($assets, $layer_dir) {
     $layers = [];
 
-    foreach (array_values($assets) as $i => $asset_path) {
+    foreach (array_values($assets) as $i => $asset) {
+        if (is_array($asset)) {
+            $asset_path = is_string($asset['source_path'] ?? '') ? (string)$asset['source_path'] : '';
+            $source_type = self::actor_registry_source_type($asset['source_type'] ?? 'legacy_cast');
+            $accepted_as_actor = !empty($asset['accepted_as_actor']);
+            $actor_index = isset($asset['actor_index']) ? (int)$asset['actor_index'] : $i;
+        } else {
+            $asset_path = is_string($asset) ? $asset : '';
+            $source_type = 'legacy_cast';
+            $accepted_as_actor = true;
+            $actor_index = $i;
+        }
+
+        if (!$accepted_as_actor || !in_array($source_type, ['principal_cast', 'legacy_cast'], true)) {
+            error_log('CMSG LAYERED QUALITY FAIL: non_cast_asset_in_actor_registry source_type=' . sanitize_text_field($source_type) . ' path=' . sanitize_text_field($asset_path));
+            return [];
+        }
+
         $label = self::actor_layer_label($i);
         $cutout_path = trailingslashit($layer_dir) . 'actor_' . $label . '_cutout.png';
         $layer_path = trailingslashit($layer_dir) . 'actor_' . $label . '_layer.png';
@@ -2839,9 +3045,12 @@ private static function prepare_identity_actor_layers($assets, $layer_dir) {
         }
 
         $layers[] = [
-            'index' => $i,
+            'index' => $actor_index,
             'label' => $label,
             'source' => $asset_path,
+            'source_type' => $source_type,
+            'accepted_as_actor' => true,
+            'principal_cast_only' => true,
             'cutout' => $cutout_path,
             'layer' => $layer_path,
             'fallback_used' => $fallback_used,
