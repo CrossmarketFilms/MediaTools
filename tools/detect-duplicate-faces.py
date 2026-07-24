@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+from contextlib import redirect_stdout
 
 missing_dependencies = []
 
@@ -56,11 +57,12 @@ def cosine_similarity(a, b):
 
 
 def build_face_app():
-    app = insightface.app.FaceAnalysis(
-        name="buffalo_l",
-        providers=["CPUExecutionProvider"],
-    )
-    app.prepare(ctx_id=-1, det_size=(640, 640))
+    with redirect_stdout(sys.stderr):
+        app = insightface.app.FaceAnalysis(
+            name="buffalo_l",
+            providers=["CPUExecutionProvider"],
+        )
+        app.prepare(ctx_id=-1, det_size=(640, 640))
     return app
 
 

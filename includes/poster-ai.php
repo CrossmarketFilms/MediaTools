@@ -1,6 +1,9 @@
 <?php
 if (!defined('ABSPATH')) { exit; }
 
+require_once __DIR__ . '/poster-story-analyzer.php';
+require_once __DIR__ . '/poster-director.php';
+
 final class CMSG_Poster_AI {
     private static $in_final_generation = false;
     private static $final_openai_calls = 0;
@@ -9,8 +12,15 @@ final class CMSG_Poster_AI {
     private static $enable_preview_quality_check = true;
     private static $duplicate_face_similarity_threshold = 0.62;
     private static $duplicate_face_detector_method = 'embedding_with_heuristic_fallback';
+    private static $last_background_openai_error = [];
+    private static $last_identity_actor_diagnostic_context = [];
+    private static $poster_actor_trace_shutdown_registered = false;
     private const SINGLE_PASS_MAX_CAST_REFERENCES = 4;
     private const LAYERED_CAMPAIGN_BACKGROUND_RETRIES = 3;
+    private const BACKGROUND_PERSON_CONFIDENCE_THRESHOLD = 0.72;
+    private const PROFESSIONAL_RECOVERY_DEFAULT_TEMPLATE = 'prestige_ensemble_pyramid';
+    private const PROFESSIONAL_RECOVERY_IDENTITY_MATCH_THRESHOLD = 0.35;
+    private const PROFESSIONAL_RECOVERY_IDENTITY_MATCH_MARGIN = 0.08;
 
     private static function normalized_cast_members($brief) {
         $members = [];
@@ -657,7 +667,7 @@ STRICT BACKGROUND-ONLY RULES:
             . ($has_style_reference ? "- A style reference image is provided. Use it ONLY for mood, lighting, composition, palette, typography placement, and cinematic design language. Do NOT copy faces, people, actors, logos, or text from the style reference. Actor identity must come only from Principal Cast images.\n" : '')
             . ($asset_count > 0
               ? "- {$asset_count} props/logos/visual reference image(s) are provided with descriptions in the Visual Reference Registry. Treat them as non-human visual references for objects, symbols, products, vehicles, buildings, logos, props, palette, and atmosphere. Do not treat these as actor photos or cast identity sources.\n"
-              : '') 
+              : '')
             . (
                  !empty($brief['preserve_identity'])
                  ? "\nSTRICT IDENTITY INSTRUCTION:\nWhen reference character images are provided, preserve the exact facial identity, skin tone, facial structure, age, hairstyle, expression, and recognizable likeness from uploaded images. Do not redesign, beautify, mutate, cartoonize, reinterpret, or replace uploaded faces or subjects.\n"
@@ -762,6 +772,8 @@ public static function generate_previews($brief, $draft_id) {
         return new WP_Error('single_pass_large_cast_blocked', $message);
     }
 
+    self::queue_poster_director_diagnostic_manifest($brief, $draft_id);
+
     $variants = ['hero', 'emotional', 'streaming'];
     $files = [];
     self::$last_preview_quality_message = '';
@@ -787,6 +799,10 @@ try {
 } catch (Exception $e) {
     return new WP_Error('cmsg_openai_image_error', $e->getMessage());
 }
+
+            if (is_wp_error($clean_path)) {
+                return $clean_path;
+            }
 
             if (!$clean_path || !file_exists($clean_path)) {
                 continue;
@@ -844,6 +860,20 @@ self::apply_watermark($display_path);
             return self::generate_svg_fallback_previews($brief, $draft_id);
         }
     return $files;
+}
+
+private static function queue_poster_director_diagnostic_manifest($brief, $draft_id) {
+    if (!class_exists('CMSG_Poster_Director')) {
+        return false;
+    }
+
+    try {
+        $actor_registry = self::actor_source_registry($brief);
+        return CMSG_Poster_Director::queue_diagnostic_manifest($brief, $actor_registry, $draft_id);
+    } catch (Throwable $e) {
+        error_log('CMSG POSTER DIRECTOR DIAGNOSTIC QUEUE FAIL: draft_id=' . intval($draft_id) . ' message=' . $e->getMessage());
+        return false;
+    }
 }
 
 private static function reject_preview_candidate($clean_path) {
@@ -917,7 +947,7 @@ private static function preview_duplicate_face_quality_check($clean_path, $brief
     }
     $cmd .= ' 2>&1';
     $raw = shell_exec($cmd);
-    $decoded = json_decode(trim((string)$raw), true);
+    $decoded = self::decode_detector_json_output($raw);
 
     if (is_array($decoded) && ($decoded['error'] ?? '') === 'missing_dependency') {
         error_log('CMSG POSTER PREVIEW QUALITY CHECK DEPENDENCY MISSING: missing=' . wp_json_encode($decoded['missing'] ?? []));
@@ -1000,6 +1030,12 @@ private static function generate_preview_format_family($clean_path, $brief) {
         }
 
         return true;
+    }
+
+    if (self::poster_requires_layered_campaign($brief)) {
+        error_log('CMSG POSTER ROUTE BYPASS DETECTED: banner_ai_regeneration_attempted_when_layered_required clean_path=' . (string)$clean_path);
+        error_log('CMSG POSTER ROUTE FAIL CLOSED: layered_family_manifest_missing clean_path=' . (string)$clean_path);
+        return false;
     }
 
     $master_path = self::create_campaign_master_source($clean_path, $brief);
@@ -1188,7 +1224,7 @@ private static function generate_identity_composite_family_source($brief, $out, 
     return file_exists($out) && filesize($out) > 0;
 }
 
-private static function generate_background_only_file($brief, $out, $variant, $openai_size) {
+private static function generate_background_only_file($brief, $out, $variant, $openai_size, $diagnostics = []) {
     $api_key = trim((string) CMSG_Plugin::settings()['openai_api_key']);
     if (!$api_key) {
         error_log('CMSG POSTER IDENTITY COMPOSITE ERROR: OpenAI API key is missing for background generation.');
@@ -1196,9 +1232,22 @@ private static function generate_background_only_file($brief, $out, $variant, $o
     }
 
     $prompt = self::build_background_only_prompt($brief, $variant);
-    $response = self::call_image_generation($api_key, $prompt, $openai_size);
+    self::write_background_prompt_audit(self::background_prompt_audit_path($out), self::background_prompt_audit($brief, $prompt));
+    error_log('CMSG BACKGROUND OPAQUE SOURCE REQUESTED variant=' . sanitize_key($variant) . ' size=' . sanitize_text_field($openai_size) . ' out=' . $out);
+    self::$last_background_openai_error = [];
+    $response = self::call_image_generation($api_key, $prompt, $openai_size, 'opaque', $diagnostics);
     if (is_wp_error($response)) {
-        error_log('CMSG POSTER IDENTITY COMPOSITE BACKGROUND ERROR: ' . $response->get_error_message());
+        self::$last_background_openai_error = self::background_openai_error_trace_fields([
+            'http_status' => 0,
+            'openai_error' => [
+                'message' => $response->get_error_message(),
+                'type' => '',
+                'code' => $response->get_error_code(),
+                'param' => '',
+            ],
+            'response_path' => is_array($diagnostics) ? (string)($diagnostics['response_path'] ?? '') : '',
+        ]);
+        error_log('CMSG POSTER IDENTITY COMPOSITE BACKGROUND OPENAI ERROR: ' . $response->get_error_message());
         return false;
     }
 
@@ -1207,7 +1256,13 @@ private static function generate_background_only_file($brief, $out, $variant, $o
     $data = json_decode($body, true);
 
     if ($code < 200 || $code >= 300 || empty($data['data'][0]['b64_json'])) {
-        error_log('CMSG POSTER IDENTITY COMPOSITE BACKGROUND ERROR CODE: ' . $code . ' BODY: ' . $body);
+        $error = self::openai_response_error_summary($response, $body);
+        self::$last_background_openai_error = self::background_openai_error_trace_fields([
+            'http_status' => $code,
+            'openai_error' => $error,
+            'response_path' => is_array($diagnostics) ? (string)($diagnostics['response_path'] ?? '') : '',
+        ]);
+        error_log('CMSG POSTER IDENTITY COMPOSITE BACKGROUND OPENAI ERROR status=' . intval($code) . ' message=' . ($error['message'] ?? '') . ' type=' . ($error['type'] ?? '') . ' code=' . ($error['code'] ?? '') . ' param=' . ($error['param'] ?? ''));
         return false;
     }
 
@@ -1222,36 +1277,136 @@ private static function generate_background_only_file($brief, $out, $variant, $o
     return file_exists($out) && filesize($out) > 0;
 }
 
-private static function build_background_only_prompt($brief, $variant = '') {
-    $title = sanitize_text_field($brief['title'] ?? ($brief['movie_title'] ?? 'Untitled Film'));
-    $genre = sanitize_text_field($brief['genre'] ?? '');
-    $mood = sanitize_text_field($brief['mood'] ?? '');
-    $style = sanitize_text_field($brief['style_preset'] ?? '');
-    $scene = sanitize_textarea_field($brief['poster_description'] ?? '');
-    $variant_label = sanitize_text_field($variant ?: 'vertical');
+private static function background_openai_diagnostic_path($background_path, $kind, $attempt = 0) {
+    if (!is_string($background_path) || $background_path === '') return '';
+    $dir = dirname($background_path);
+    if (!is_dir($dir)) {
+        wp_mkdir_p($dir);
+    }
 
-    $prompt = "Create a cinematic movie poster BACKGROUND PLATE ONLY.\n\n";
-    $prompt .= "PROJECT: {$title}\n";
-    if ($genre !== '') $prompt .= "GENRE: {$genre}\n";
-    if ($mood !== '') $prompt .= "MOOD: {$mood}\n";
-    if ($style !== '') $prompt .= "STYLE PRESET: {$style}\n";
-    $prompt .= "FORMAT: {$variant_label}\n\n";
-    $prompt .= "BACKGROUND SCENE DIRECTION:\n";
-    $prompt .= ($scene !== '' ? $scene : 'Create a polished cinematic environment with dramatic lighting and title-safe lower space.') . "\n\n";
-    $prompt .= "Use the scene direction only to infer environment, era, props, weather, lighting, symbolism, and empty placement zones. Ignore any instruction to draw actors or people; actor layers will be composited later from uploaded references only.\n\n";
-    $prompt .= "STRICT BACKGROUND-ONLY RULES:\n";
-    $prompt .= "- NO people, NO faces, NO human silhouettes, NO characters, NO actors, NO bodies.\n";
-    $prompt .= "- Do not create people, actors, faces, bodies, silhouettes, crowds, reflections of people, portraits, statues, masks, mannequins, ghosts, or human-like figures.\n";
-    $prompt .= "- Do not create floating heads, bust portraits, background cast, shadow people, crowd texture, human-shaped smoke, or human-like reflections.\n";
-    $prompt .= "- If the scene direction mentions Actor 1, Actor 2, cast, father, mother, daughter, lead, supporting, or any character placement, convert that into EMPTY reserved space only.\n";
-    $prompt .= "- The background plate will be rejected if any human face, head, body, figure, silhouette, statue, portrait, or person-like form appears.\n";
-    $prompt .= "- Do not render the movie title, tagline, credits, logos, captions, signs, readable text, or typography.\n";
-    $prompt .= "- Leave clean visual space for actor layers and final title typography that will be composited later by the plugin.\n";
-    $prompt .= "- The result must be a people-free cinematic background plate only.\n";
-    $prompt .= "- Use atmospheric lighting, depth, props, vehicles, buildings, symbols, and environment elements only.\n";
-
-    return $prompt;
+    $kind = sanitize_key($kind);
+    $attempt = max(1, (int)$attempt);
+    return trailingslashit($dir) . 'background-openai-' . $kind . '-attempt-' . $attempt . '.json';
 }
+
+private static function write_background_openai_diagnostic($path, $payload) {
+    if (!is_string($path) || $path === '' || !is_array($payload)) return false;
+    $dir = dirname($path);
+    if (!is_dir($dir)) {
+        wp_mkdir_p($dir);
+    }
+
+    $json = wp_json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if (!is_string($json) || $json === '') return false;
+
+    $tmp = $path . '.tmp';
+    if (file_put_contents($tmp, $json) === false) return false;
+    @chmod($tmp, 0640);
+    if (!@rename($tmp, $path)) {
+        @unlink($tmp);
+        return false;
+    }
+    @chmod($path, 0640);
+    return true;
+}
+
+private static function openai_response_error_summary($response, $body = '') {
+    $summary = [
+        'message' => '',
+        'type' => '',
+        'code' => '',
+        'param' => '',
+    ];
+
+    if (is_wp_error($response)) {
+        $summary['message'] = $response->get_error_message();
+        $summary['code'] = $response->get_error_code();
+        return $summary;
+    }
+
+    if (!is_string($body) || $body === '') {
+        $body = wp_remote_retrieve_body($response);
+    }
+
+    $decoded = json_decode((string)$body, true);
+    if (is_array($decoded) && isset($decoded['error']) && is_array($decoded['error'])) {
+        $error = $decoded['error'];
+        $summary['message'] = is_string($error['message'] ?? '') ? $error['message'] : '';
+        $summary['type'] = is_string($error['type'] ?? '') ? $error['type'] : '';
+        $summary['code'] = is_string($error['code'] ?? '') ? $error['code'] : '';
+        $summary['param'] = is_string($error['param'] ?? '') ? $error['param'] : '';
+    } elseif (is_array($decoded)) {
+        $summary['message'] = is_string($decoded['message'] ?? '') ? $decoded['message'] : '';
+        $summary['code'] = is_string($decoded['code'] ?? '') ? $decoded['code'] : '';
+    } else {
+        $summary['message'] = substr(trim((string)$body), 0, 500);
+    }
+
+    return $summary;
+}
+
+private static function background_openai_error_trace_fields($diagnostic) {
+    $error = is_array($diagnostic['openai_error'] ?? null) ? $diagnostic['openai_error'] : [];
+    return [
+        'background_openai_http_status' => (int)($diagnostic['http_status'] ?? 0),
+        'background_openai_error_message' => is_string($error['message'] ?? '') ? $error['message'] : '',
+        'background_openai_error_type' => is_string($error['type'] ?? '') ? $error['type'] : '',
+        'background_openai_error_code' => is_string($error['code'] ?? '') ? $error['code'] : '',
+        'background_openai_error_param' => is_string($error['param'] ?? '') ? $error['param'] : '',
+        'background_openai_response_path' => is_string($diagnostic['response_path'] ?? '') ? $diagnostic['response_path'] : '',
+    ];
+}
+
+private static function sanitize_openai_response_for_diagnostics($decoded) {
+    if (!is_array($decoded)) return $decoded;
+    if (!empty($decoded['data']) && is_array($decoded['data'])) {
+        foreach ($decoded['data'] as $index => $item) {
+            if (is_array($item) && isset($item['b64_json']) && is_string($item['b64_json'])) {
+                $decoded['data'][$index]['b64_json'] = [
+                    'omitted' => true,
+                    'byte_length' => strlen($item['b64_json']),
+                    'sha256' => hash('sha256', $item['b64_json']),
+                ];
+            }
+        }
+    }
+    return $decoded;
+}
+
+private static function build_background_only_prompt($brief, $variant = '') {
+    $variant = sanitize_key($variant ?: 'vertical');
+    $title = sanitize_text_field($brief['title'] ?? ($brief['movie_title'] ?? 'Untitled Film'));
+    $genre = sanitize_text_field($brief['genre'] ?? 'Drama');
+    $mood = sanitize_text_field($brief['mood'] ?? 'Cinematic');
+    $style = sanitize_text_field($brief['style_preset'] ?? 'cinematic_premium');
+    $evidence = self::extract_background_element_evidence($brief);
+    $positive = array_values((array)($evidence['positive_elements'] ?? []));
+    $scene = !empty($positive) ? implode(', ', array_slice($positive, 0, 10)) : self::build_genre_neutral_background_fallback($brief);
+
+    foreach ((array)($evidence['excluded_elements'] ?? []) as $blocked) {
+        error_log('CMSG BACKGROUND UNSUPPORTED ELEMENT BLOCKED element=' . sanitize_key($blocked));
+    }
+
+    $format_line = $variant === 'banner'
+        ? 'Native wide streaming hero banner composition, 895x504 aspect ratio, broad horizontal depth.'
+        : 'Native vertical theatrical key art background, 900x1285 aspect ratio, full poster depth.';
+
+    error_log('CMSG BACKGROUND OPAQUE SOURCE REQUESTED variant=' . $variant);
+
+    return trim("Create a full-bleed opaque cinematic background plate only.\n" .
+        "POSTER PROJECT: {$title}\n" .
+        "GENRE: {$genre}\n" .
+        "MOOD: {$mood}\n" .
+        "STYLE PRESET: {$style}\n" .
+        "FORMAT: {$format_line}\n" .
+        "EVIDENCE-SUPPORTED ENVIRONMENT: {$scene}\n" .
+        "Full-bleed opaque cinematic background. Fill every pixel. No transparency, no alpha holes, no cutout shape, no vignette mask, no isolated floating artwork.\n" .
+        "STRICT BACKGROUND-ONLY RULES: No people, no actors, no faces, no human bodies, no silhouettes, no portraits, no crowds, no reflections of people, no human figures in windows, no statues resembling people.\n" .
+        "Do not infer religious buildings or symbols from the movie title. Use only environment elements explicitly supported by scene direction, setting, synopsis, prop descriptions, or visual-reference descriptions.\n" .
+        "Avoid unsupported church, cathedral, chapel, cross, graveyard, monastery, mosque, temple, shrine, castle, or palace imagery unless explicitly requested in the brief.\n" .
+        "Leave clean atmosphere and depth for deterministic actor and prop compositing later.");
+}
+
 
 private static function generate_native_preview_family_source($selected_preview_path, $out, $brief, $key, $openai_size) {
     $api_key = trim((string) CMSG_Plugin::settings()['openai_api_key']);
@@ -1392,6 +1547,12 @@ public static function generate_final_files($brief, $job_id, $selected_concept =
         error_log('CMSG POSTER FINAL TRACE: openai_calls_during_finalization=' . intval(self::$final_openai_calls));
         self::$in_final_generation = false;
         return $files;
+    }
+
+    if (self::poster_requires_layered_campaign($brief)) {
+        error_log('CMSG POSTER ROUTE FAIL CLOSED: final_missing_layered_manifest selected=' . $selected_preview_path . ' manifest=' . self::campaign_manifest_path($selected_preview_path));
+        self::$in_final_generation = false;
+        return [];
     }
 
     $campaign_master_path = self::create_campaign_master_source($selected_preview_path, $brief);
@@ -1544,6 +1705,160 @@ private static function poster_generation_mode($brief) {
     return $mode;
 }
 
+private static function poster_cast_count($brief) {
+    $counts = self::cast_counts($brief);
+    return (int)($counts['total'] ?? 0);
+}
+
+private static function poster_has_cast_assets($brief) {
+    return self::poster_cast_count($brief) > 0;
+}
+
+private static function poster_preserve_identity_enabled($brief) {
+    return !empty($brief['preserve_identity']);
+}
+
+private static function decode_detector_json_output($raw) {
+    $raw = trim((string)$raw);
+    if ($raw === '') {
+        error_log('CMSG DETECTOR JSON PARSE FAILED: empty_output');
+        return [];
+    }
+
+    $decoded = json_decode($raw, true);
+    if (is_array($decoded)) {
+        return $decoded;
+    }
+
+    $lines = preg_split('/\R+/', $raw);
+    foreach (array_reverse((array)$lines) as $line) {
+        $line = trim((string)$line);
+        if ($line === '') continue;
+        $candidate = json_decode($line, true);
+        if (is_array($candidate)) {
+            error_log('CMSG DETECTOR JSON RECOVERED: recovered_from_line');
+            return $candidate;
+        }
+    }
+
+    $pos = strrpos($raw, '{');
+    if ($pos !== false) {
+        $candidate = json_decode(substr($raw, $pos), true);
+        if (is_array($candidate)) {
+            error_log('CMSG DETECTOR JSON RECOVERED: recovered_from_last_brace');
+            return $candidate;
+        }
+    }
+
+    error_log('CMSG DETECTOR JSON PARSE FAILED: raw=' . substr($raw, 0, 500));
+    return [];
+}
+
+private static function poster_requires_layered_campaign($brief) {
+    $cast_count = self::poster_cast_count($brief);
+    $preserve = self::poster_preserve_identity_enabled($brief);
+    $mode = self::poster_generation_mode($brief);
+
+    if ($preserve && $cast_count > 0) return true;
+    if ($mode === 'layered_campaign') return true;
+    if ($mode === 'identity_composite') return true;
+
+    return false;
+}
+
+private static function poster_pipeline_trace_path($draft_id, $variant, $index) {
+    $uploads = wp_upload_dir();
+    $dir = trailingslashit($uploads['basedir']) . 'poster-previews';
+
+    if (!is_dir($dir)) {
+        wp_mkdir_p($dir);
+    }
+
+    return trailingslashit($dir)
+        . 'poster-pipeline-trace-'
+        . intval($draft_id)
+        . '-'
+        . sanitize_key($variant)
+        . '-'
+        . intval($index)
+        . '.json';
+}
+
+private static function layered_background_validation_path($output_path) {
+    if (!is_string($output_path) || $output_path === '') return '';
+    $background_path = trailingslashit(self::identity_composite_layer_dir($output_path)) . 'background_base.png';
+    return self::background_validation_report_path($background_path);
+}
+
+private static function poster_route_trace_payload($brief, $route_selected, $fallback_reason = '', $output_path = '', $error_code = '', $error_message = '') {
+    $manifest_path = $output_path ? self::campaign_manifest_path($output_path) : '';
+
+    return [
+        'poster_generation_mode' => self::poster_generation_mode($brief),
+        'preserve_identity' => self::poster_preserve_identity_enabled($brief),
+        'cast_count' => self::poster_cast_count($brief),
+        'has_cast_assets' => self::poster_has_cast_assets($brief),
+        'should_use_identity_composite' => self::should_use_identity_composite($brief),
+        'requires_layered_campaign' => self::poster_requires_layered_campaign($brief),
+        'route_selected' => sanitize_key($route_selected),
+        'fallback_reason' => sanitize_key($fallback_reason),
+        'output_path' => (string)$output_path,
+        'manifest_path' => (string)$manifest_path,
+        'actor_registry_audit_path' => $manifest_path ? self::actor_registry_audit_path($manifest_path) : '',
+        'placement_audit_path' => $output_path ? self::campaign_render_audit_path($output_path) : '',
+        'background_validation_path' => $output_path ? self::layered_background_validation_path($output_path) : '',
+        'error_code' => sanitize_key($error_code),
+        'error_message' => sanitize_text_field($error_message),
+    ];
+}
+
+private static function write_poster_pipeline_trace($draft_id, $variant, $index, $trace) {
+    $path = self::poster_pipeline_trace_path($draft_id, $variant, $index);
+
+    if (!is_array($trace)) $trace = [];
+
+    $payload = array_merge([
+        'created_at' => gmdate('c'),
+        'draft_id' => intval($draft_id),
+        'variant' => sanitize_key($variant),
+        'index' => intval($index),
+    ], $trace);
+
+    file_put_contents($path, wp_json_encode($payload, JSON_PRETTY_PRINT));
+    @chmod($path, 0664);
+
+    error_log('CMSG POSTER PIPELINE TRACE path=' . $path . ' route=' . sanitize_text_field($payload['route_selected'] ?? '') . ' mode=' . sanitize_text_field($payload['poster_generation_mode'] ?? ''));
+
+    return $path;
+}
+
+private static function verify_layered_campaign_artifacts($output_path) {
+    $manifest_path = self::campaign_manifest_path($output_path);
+    $placement_audit_path = self::campaign_render_audit_path($output_path);
+    $actor_registry_path = self::actor_registry_audit_path($manifest_path);
+
+    $missing = [];
+
+    foreach ([
+        'manifest_path' => $manifest_path,
+        'placement_audit_path' => $placement_audit_path,
+        'actor_registry_audit_path' => $actor_registry_path,
+    ] as $key => $path) {
+        if (empty($path) || !file_exists($path) || filesize($path) <= 0) {
+            $missing[$key] = $path;
+        }
+    }
+
+    return [
+        'ok' => empty($missing),
+        'missing' => $missing,
+        'manifest_path' => $manifest_path,
+        'placement_audit_path' => $placement_audit_path,
+        'actor_registry_audit_path' => $actor_registry_path,
+        'background_validation_path' => self::layered_background_validation_path($output_path),
+    ];
+}
+
 private static function should_use_identity_composite($brief) {
     $mode = self::poster_generation_mode($brief);
     if ($mode === 'single_pass') {
@@ -1558,16 +1873,123 @@ private static function should_use_identity_composite($brief) {
 }
 
 private static function generate_preview_candidate_file($brief, $draft_id, $variant, $index) {
-    if (self::should_use_identity_composite($brief)) {
+
+    file_put_contents(
+        WP_CONTENT_DIR . '/poster-route-test.log',
+        date('c') . " ENTER generate_preview_candidate_file\n",
+        FILE_APPEND
+    );
+
+    $mode = self::poster_generation_mode($brief);
+    $cast_count = self::poster_cast_count($brief);
+    $requires_layered = self::poster_requires_layered_campaign($brief);
+
+    if ($requires_layered) {
+        error_log('CMSG POSTER ROUTE SELECTED: layered_campaign draft_id=' . intval($draft_id) . ' variant=' . sanitize_key($variant) . ' index=' . intval($index) . ' mode=' . $mode . ' cast_count=' . intval($cast_count));
+
         $composite_path = self::create_layered_campaign_master($brief, $draft_id, $variant, $index);
+
+file_put_contents(
+    WP_CONTENT_DIR . '/poster-route-test.log',
+    date('c') . " RETURN create_layered_campaign_master=" . var_export($composite_path, true) . "\n",
+    FILE_APPEND
+);
+
         if ($composite_path && file_exists($composite_path)) {
+            $artifact_check = self::verify_layered_campaign_artifacts($composite_path);
+            self::write_poster_pipeline_trace($draft_id, $variant, $index, array_merge(
+                self::poster_route_trace_payload($brief, 'layered_campaign', '', $composite_path),
+                [
+                    'artifact_check' => $artifact_check,
+                    'manifest_path' => $artifact_check['manifest_path'] ?? self::campaign_manifest_path($composite_path),
+                    'actor_registry_audit_path' => $artifact_check['actor_registry_audit_path'] ?? '',
+                    'placement_audit_path' => $artifact_check['placement_audit_path'] ?? '',
+                    'background_validation_path' => $artifact_check['background_validation_path'] ?? '',
+                ]
+            ));
+
+            if (empty($artifact_check['ok'])) {
+                error_log('CMSG POSTER ROUTE FAIL CLOSED: layered_artifact_missing draft_id=' . intval($draft_id) . ' variant=' . sanitize_key($variant) . ' index=' . intval($index) . ' missing=' . wp_json_encode($artifact_check['missing'] ?? []));
+                self::write_poster_pipeline_trace($draft_id, $variant, $index, array_merge(
+                    self::poster_route_trace_payload($brief, 'layered_campaign', 'layered_artifact_missing', $composite_path, 'layered_artifact_missing', 'Layered campaign output is missing required manifest or audit artifacts.'),
+                    ['artifact_check' => $artifact_check]
+                ));
+                return new WP_Error(
+                    'layered_artifact_missing',
+                    'Layered campaign generation did not produce the required manifest and audit files. Preview generation was stopped to preserve actor identity.'
+                );
+            }
+
             return $composite_path;
         }
 
-        error_log('CMSG LAYERED QUALITY FAIL: layered_campaign_failed_closed draft_id=' . intval($draft_id) . ' variant=' . sanitize_key($variant));
+        error_log('CMSG POSTER ROUTE FAIL CLOSED: layered_campaign_failed draft_id=' . intval($draft_id) . ' variant=' . sanitize_key($variant) . ' index=' . intval($index));
+        self::write_poster_pipeline_trace($draft_id, $variant, $index, array_merge(
+            self::poster_route_trace_payload(
+                $brief,
+                'layered_campaign',
+                '',
+                (string)$composite_path,
+                'layered_campaign_failed_closed',
+                'Layered campaign generation failed; fallback to single-pass is disabled.'
+            ),
+            self::$last_background_openai_error
+        ));
+
+        return new WP_Error(
+            'layered_campaign_failed_closed',
+            'Layered campaign generation failed. Fallback to single-pass generation is disabled to preserve actor identity.'
+        );
+    }
+
+    if (self::should_use_identity_composite($brief)) {
+        error_log('CMSG POSTER ROUTE SELECTED: layered_campaign_optional draft_id=' . intval($draft_id) . ' variant=' . sanitize_key($variant) . ' index=' . intval($index) . ' mode=' . $mode . ' cast_count=' . intval($cast_count));
+
+        $composite_path = self::create_layered_campaign_master($brief, $draft_id, $variant, $index);
+        if ($composite_path && file_exists($composite_path)) {
+            $artifact_check = self::verify_layered_campaign_artifacts($composite_path);
+            self::write_poster_pipeline_trace($draft_id, $variant, $index, array_merge(
+                self::poster_route_trace_payload($brief, 'layered_campaign_optional', '', $composite_path),
+                ['artifact_check' => $artifact_check]
+            ));
+
+            if (!empty($artifact_check['ok'])) {
+                return $composite_path;
+            }
+
+            error_log('CMSG POSTER ROUTE FAIL CLOSED: optional_layered_artifact_missing draft_id=' . intval($draft_id) . ' variant=' . sanitize_key($variant) . ' index=' . intval($index) . ' missing=' . wp_json_encode($artifact_check['missing'] ?? []));
+            return '';
+        }
+
+        self::write_poster_pipeline_trace($draft_id, $variant, $index, self::poster_route_trace_payload(
+            $brief,
+            'layered_campaign_optional',
+            '',
+            (string)$composite_path,
+            'optional_layered_campaign_failed',
+            'Optional layered campaign generation failed.'
+        ));
         return '';
     }
 
+    if ($requires_layered) {
+        error_log('CMSG POSTER ROUTE BYPASS DETECTED: attempted_single_pass_when_layered_required draft_id=' . intval($draft_id) . ' variant=' . sanitize_key($variant) . ' index=' . intval($index));
+        self::write_poster_pipeline_trace($draft_id, $variant, $index, self::poster_route_trace_payload(
+            $brief,
+            'bypass_blocked',
+            'single_pass_attempted_when_layered_required',
+            '',
+            'layered_route_bypass_blocked',
+            'Single-pass generation was attempted even though layered campaign mode is required.'
+        ));
+        return new WP_Error(
+            'layered_route_bypass_blocked',
+            'Layered campaign mode is required for this poster because cast identity preservation is enabled. Single-pass fallback was blocked.'
+        );
+    }
+
+    error_log('CMSG POSTER ROUTE SELECTED: single_pass draft_id=' . intval($draft_id) . ' variant=' . sanitize_key($variant) . ' index=' . intval($index) . ' mode=' . $mode . ' cast_count=' . intval($cast_count));
+    self::write_poster_pipeline_trace($draft_id, $variant, $index, self::poster_route_trace_payload($brief, 'single_pass'));
     return self::generate_image_file($brief, $draft_id, 'preview-clean', $variant, $index, false);
 }
 
@@ -1592,6 +2014,14 @@ private static function generate_identity_composite_preview_file($brief, $draft_
 }
 
 private static function create_layered_campaign_master($brief, $draft_id, $variant, $index) {
+
+error_log(
+    'CMSG ENTER create_layered_campaign_master draft_id=' .
+    intval($draft_id) .
+    ' variant=' . sanitize_key($variant) .
+    ' index=' . intval($index)
+);
+
     $variant = sanitize_key($variant ?: 'vertical');
     $out_path = self::preview_clean_file_path($draft_id, $variant, $index);
     $campaign_id = sanitize_key('draft-' . intval($draft_id) . '-' . $variant . '-' . intval($index) . '-' . substr(md5($out_path), 0, 10));
@@ -1605,7 +2035,15 @@ private static function create_layered_campaign_master($brief, $draft_id, $varia
         return $row['source_path'] ?? '';
     }, $cast_records));
 
+file_put_contents(
+    WP_CONTENT_DIR . '/poster-route-test.log',
+    date('c') . " STEP 1 cast assets prepared count=" . count($cast_assets) . "\n",
+    FILE_APPEND
+);
+
     error_log('CMSG LAYERED CAMPAIGN START: campaign_id=' . $campaign_id . ' draft_id=' . intval($draft_id) . ' variant=' . $variant . ' cast_count=' . count($cast_assets));
+    error_log('CMSG PROFESSIONAL RECOVERY START campaign_id=' . $campaign_id . ' variant=' . $variant . ' cast_count=' . count($cast_assets));
+    error_log('CMSG PROFESSIONAL RECOVERY TEMPLATE campaign_id=' . $campaign_id . ' template=' . self::professional_recovery_template_key($brief, count($cast_assets)));
 
     if (empty($cast_assets)) {
         error_log('CMSG LAYERED QUALITY FAIL: no_cast_assets campaign_id=' . $campaign_id);
@@ -1613,6 +2051,13 @@ private static function create_layered_campaign_master($brief, $draft_id, $varia
     }
 
     $background = self::generate_background_plate_only($brief, $variant, '1024x1536', $background_path);
+
+    file_put_contents(
+    WP_CONTENT_DIR . '/poster-route-test.log',
+    date('c') . " STEP 2 background result=" . var_export($background, true) . "\n",
+    FILE_APPEND
+);
+
     if (!$background) {
         error_log('CMSG LAYERED QUALITY FAIL: background_generation_failed campaign_id=' . $campaign_id);
         return '';
@@ -1620,14 +2065,113 @@ private static function create_layered_campaign_master($brief, $draft_id, $varia
 
     self::resize_png_cover_no_overlay($background, $background, 900, 1285);
 
-    $actor_layers = self::prepare_campaign_actor_cutouts($brief, $layer_dir, $cast_records);
+    self::register_poster_actor_trace_shutdown([
+        'function' => 'create_layered_campaign_master',
+        'campaign_id' => $campaign_id,
+        'draft_id' => intval($draft_id),
+        'variant' => $variant,
+        'index' => intval($index),
+        'layer_dir' => $layer_dir,
+    ]);
+    self::poster_actor_trace('ACTOR_CALL_BEFORE', 'About to call prepare_campaign_actor_cutouts().', [
+        'campaign_id' => $campaign_id,
+        'draft_id' => intval($draft_id),
+        'variant' => $variant,
+        'index' => intval($index),
+        'layer_dir' => $layer_dir,
+        'cast_record_count' => count($cast_records),
+        'cast_asset_count' => count($cast_assets),
+        'background' => self::poster_actor_trace_file_state($background),
+    ]);
+    $actor_call_started = microtime(true);
+    try {
+        $actor_layers = self::prepare_campaign_actor_cutouts($brief, $layer_dir, $cast_records);
+    } catch (Throwable $e) {
+        self::poster_actor_trace('ACTOR_EXCEPTION', 'Throwable during prepare_campaign_actor_cutouts().', [
+            'campaign_id' => $campaign_id,
+            'draft_id' => intval($draft_id),
+            'variant' => $variant,
+            'exception_class' => get_class($e),
+            'message' => $e->getMessage(),
+            'file' => $e->getFile(),
+            'line' => $e->getLine(),
+            'trace' => $e->getTraceAsString(),
+            'elapsed_ms' => (int)round((microtime(true) - $actor_call_started) * 1000),
+        ]);
+        throw $e;
+    }
+    self::poster_actor_trace('ACTOR_CALL_AFTER', 'Returned from prepare_campaign_actor_cutouts().', [
+        'campaign_id' => $campaign_id,
+        'draft_id' => intval($draft_id),
+        'variant' => $variant,
+        'elapsed_ms' => (int)round((microtime(true) - $actor_call_started) * 1000),
+    ]);
+    self::poster_actor_trace('ACTOR_CALL_RESULT_TYPE', 'Actor call result classified.', [
+        'campaign_id' => $campaign_id,
+        'draft_id' => intval($draft_id),
+        'variant' => $variant,
+        'result_type' => is_wp_error($actor_layers) ? 'WP_Error' : gettype($actor_layers),
+        'count' => is_array($actor_layers) ? count($actor_layers) : null,
+        'wp_error' => self::poster_actor_trace_wp_error($actor_layers),
+    ]);
+
+    file_put_contents(
+    WP_CONTENT_DIR . '/poster-route-test.log',
+    date('c') . " STEP 3 actor layers type=" .
+    (is_wp_error($actor_layers) ? 'WP_Error' : gettype($actor_layers)) .
+    (is_array($actor_layers) ? ' count=' . count($actor_layers) : '') .
+    "\n",
+    FILE_APPEND
+);
+
+
+    if (is_wp_error($actor_layers)) {
+        self::append_poster_diagnostic_log('poster-route-test.log', array_merge([
+            'event' => 'prepare_campaign_actor_cutouts_wp_error',
+            'function' => 'create_layered_campaign_master',
+            'campaign_id' => $campaign_id,
+            'draft_id' => intval($draft_id),
+            'variant' => $variant,
+            'index' => intval($index),
+            'layer_dir' => $layer_dir,
+        ], self::wp_error_diagnostic_payload($actor_layers)));
+        error_log('CMSG PROFESSIONAL RECOVERY QUALITY FAIL code=' . $actor_layers->get_error_code() . ' message=' . $actor_layers->get_error_message());
+        return '';
+    }
     if (count($actor_layers) !== count($cast_assets)) {
         error_log('CMSG LAYERED QUALITY FAIL: actor_layer_count_mismatch campaign_id=' . $campaign_id . ' expected=' . count($cast_assets) . ' prepared=' . count($actor_layers));
         return '';
     }
 
-    $manifest = self::build_campaign_layer_manifest($brief, $background, $actor_layers, $variant);
-    if (empty($manifest) || empty($manifest['layers'])) {
+    $prop_layers = self::prepare_required_vehicle_layers($brief, $layer_dir, $campaign_id);
+
+    file_put_contents(
+    WP_CONTENT_DIR . '/poster-route-test.log',
+    date('c') . " STEP 4 prop layers type=" .
+    (is_wp_error($prop_layers) ? 'WP_Error' : gettype($prop_layers)) .
+    (is_array($prop_layers) ? ' count=' . count($prop_layers) : '') .
+    "\n",
+    FILE_APPEND
+);
+
+     if (is_wp_error($prop_layers)) {
+        error_log('CMSG PROFESSIONAL RECOVERY QUALITY FAIL code=' . $prop_layers->get_error_code() . ' message=' . $prop_layers->get_error_message());
+        return '';
+    }
+
+    $manifest = self::build_campaign_layer_manifest($brief, $background, $actor_layers, $variant, is_array($prop_layers) ? $prop_layers : []);
+
+    file_put_contents(
+    WP_CONTENT_DIR . '/poster-route-test.log',
+    date('c') . " STEP 5 manifest layers=" .
+    (is_array($manifest) && isset($manifest['layers']) && is_array($manifest['layers'])
+        ? count($manifest['layers'])
+        : 0) .
+    "\n",
+    FILE_APPEND
+);
+
+  if (empty($manifest) || empty($manifest['layers'])) {
         error_log('CMSG LAYERED QUALITY FAIL: manifest_actor_registry_empty campaign_id=' . $campaign_id);
         return '';
     }
@@ -1645,6 +2189,13 @@ private static function create_layered_campaign_master($brief, $draft_id, $varia
     }
 
     $campaign_layout = self::build_campaign_master_layout($manifest, $brief);
+
+    file_put_contents(
+    WP_CONTENT_DIR . '/poster-route-test.log',
+    date('c') . " STEP 6 campaign layout built type=" . gettype($campaign_layout) . "\n",
+    FILE_APPEND
+);
+
     if (!self::validate_campaign_layout_actor_consistency($campaign_layout, $manifest)) {
         error_log('CMSG CAMPAIGN LAYOUT INVALID campaign_id=' . $campaign_id);
         return '';
@@ -1675,15 +2226,33 @@ private static function create_layered_campaign_master($brief, $draft_id, $varia
     $manifest['variant_layouts']['banner']['actor_slots'] = self::campaign_layout_slots($banner_layout, 'banner');
     $manifest['typography_layout'] = $campaign_layout['typography'] ?? [];
 
+    file_put_contents(
+    WP_CONTENT_DIR . '/poster-route-test.log',
+    date('c') . " STEP 7 about to write manifest path=" . $manifest_path . "\n",
+    FILE_APPEND
+);
+
     if (!self::write_campaign_manifest_json($manifest, $manifest_path)) {
         error_log('CMSG LAYERED QUALITY FAIL: manifest_write_failed campaign_id=' . $campaign_id . ' path=' . $manifest_path);
         return '';
     }
 
+    file_put_contents(
+    WP_CONTENT_DIR . '/poster-route-test.log',
+    date('c') . " STEP 8 about to composite output=" . $out_path . "\n",
+    FILE_APPEND
+);
+
     if (!self::composite_layered_campaign($manifest, $out_path)) {
         error_log('CMSG LAYERED QUALITY FAIL: composite_failed campaign_id=' . $campaign_id);
         return '';
     }
+
+    file_put_contents(
+    WP_CONTENT_DIR . '/poster-route-test.log',
+    date('c') . " STEP 9 composite completed\n",
+    FILE_APPEND
+);
 
     $rendered = self::adapt_layered_campaign_to_variant($out_path, $manifest, 'banner', 895, 504);
     if (!$rendered) {
@@ -1972,16 +2541,86 @@ private static function campaign_layout_slots($layout, $variant) {
 private static function generate_background_plate_only($brief, $variant, $openai_size, $out_path) {
     $variant = sanitize_key($variant ?: 'vertical');
     $background_brief = self::background_only_brief($brief);
+    $raw_path = self::background_raw_path($out_path);
+    $opaque_path = self::background_opaque_path($out_path);
+    self::$last_background_openai_error = [];
 
     for ($attempt = 1; $attempt <= self::LAYERED_CAMPAIGN_BACKGROUND_RETRIES; $attempt++) {
         error_log('CMSG LAYERED BACKGROUND START: variant=' . $variant . ' attempt=' . intval($attempt) . ' out=' . $out_path);
-        if (!self::generate_background_only_file($background_brief, $out_path, $variant, $openai_size)) {
+        @unlink($raw_path);
+        @unlink($opaque_path);
+        @unlink($out_path);
+
+        $previous_error = self::$last_background_openai_error;
+        $request_path = self::background_openai_diagnostic_path($raw_path, 'request', $attempt);
+        $response_path = self::background_openai_diagnostic_path($raw_path, 'response', $attempt);
+        if (!self::generate_background_only_file($background_brief, $raw_path, $variant, $openai_size, [
+            'attempt' => $attempt,
+            'request_path' => $request_path,
+            'response_path' => $response_path,
+            'variant' => $variant,
+            'output_path' => $raw_path,
+            'retry_reason' => $attempt === 1 ? 'initial_attempt' : 'retry_after_previous_background_failure',
+            'previous_error' => $previous_error,
+        ])) {
             error_log('CMSG LAYERED BACKGROUND REJECTED: generation_failed variant=' . $variant . ' attempt=' . intval($attempt));
             continue;
         }
 
-        error_log('CMSG LAYERED BACKGROUND GENERATED: variant=' . $variant . ' attempt=' . intval($attempt) . ' path=' . $out_path);
-        $validation = self::validate_background_has_no_people($out_path, $brief);
+        error_log('CMSG LAYERED BACKGROUND GENERATED: variant=' . $variant . ' attempt=' . intval($attempt) . ' path=' . $raw_path);
+        $raw_opacity = self::validate_background_plate_opacity($raw_path);
+        $used_defensive_flatten = false;
+        $validation_source = $raw_path;
+        $opaque_opacity = $raw_opacity;
+
+        if (empty($raw_opacity['ok'])) {
+            error_log('CMSG BACKGROUND RAW TRANSPARENCY REJECTED variant=' . $variant . ' attempt=' . intval($attempt) . ' path=' . $raw_path . ' transparent_ratio=' . ($raw_opacity['transparent_ratio'] ?? 0) . ' partial_alpha_ratio=' . ($raw_opacity['partial_alpha_ratio'] ?? 0));
+            if ($attempt < self::LAYERED_CAMPAIGN_BACKGROUND_RETRIES) {
+                continue;
+            }
+
+            if (!self::flatten_background_plate_opaque($raw_path, $opaque_path, $brief)) {
+                error_log('CMSG LAYERED QUALITY FAIL: background_opacity_normalization_failed variant=' . $variant . ' attempt=' . intval($attempt) . ' path=' . $raw_path);
+                continue;
+            }
+
+            $opaque_opacity = self::validate_background_plate_opacity($opaque_path);
+            $validation_source = $opaque_path;
+            $used_defensive_flatten = true;
+        } else {
+            @copy($raw_path, $opaque_path);
+            @chmod($opaque_path, 0664);
+        }
+
+        $opacity_report = [
+            'raw_background_path' => $raw_path,
+            'opaque_background_path' => $opaque_path,
+            'raw_transparent_ratio' => (float)($raw_opacity['transparent_ratio'] ?? 0),
+            'raw_partial_alpha_ratio' => (float)($raw_opacity['partial_alpha_ratio'] ?? 0),
+            'opaque_transparent_ratio' => (float)($opaque_opacity['transparent_ratio'] ?? 0),
+            'opaque_partial_alpha_ratio' => (float)($opaque_opacity['partial_alpha_ratio'] ?? 0),
+            'opacity_normalized' => $used_defensive_flatten,
+            'opacity_ok' => !empty($opaque_opacity['ok']),
+            'raw_opacity' => $raw_opacity,
+            'opaque_opacity' => $opaque_opacity,
+        ];
+
+        if (empty($opaque_opacity['ok'])) {
+            error_log('CMSG LAYERED QUALITY FAIL: background_opacity_normalization_failed variant=' . $variant . ' attempt=' . intval($attempt) . ' result=' . wp_json_encode($opacity_report));
+            self::write_background_validation_report($opaque_path, array_merge($opacity_report, [
+                'ok' => false,
+                'reason' => 'background_opacity_normalization_failed',
+            ]));
+            continue;
+        }
+
+        if (!@copy($validation_source, $out_path)) {
+            error_log('CMSG LAYERED QUALITY FAIL: background_opacity_normalization_failed copy_failed variant=' . $variant . ' attempt=' . intval($attempt) . ' src=' . $validation_source . ' dest=' . $out_path);
+            continue;
+        }
+        @chmod($out_path, 0664);
+
+        $validation = self::validate_background_has_no_people($out_path, $brief, $opacity_report);
         if (!empty($validation['ok'])) {
             return $out_path;
         }
@@ -1992,6 +2631,16 @@ private static function generate_background_plate_only($brief, $variant, $openai
     }
 
     return '';
+}
+
+private static function background_raw_path($background_path) {
+    if (!is_string($background_path) || $background_path === '') return '';
+    return preg_replace('/\.png$/i', '-background-raw.png', $background_path);
+}
+
+private static function background_opaque_path($background_path) {
+    if (!is_string($background_path) || $background_path === '') return '';
+    return preg_replace('/\.png$/i', '-background-opaque.png', $background_path);
 }
 
 private static function background_validation_input_path($background_path) {
@@ -2012,6 +2661,15 @@ private static function write_background_validation_report($background_path, $re
         'people_detected' => 0,
         'silhouettes_detected' => 0,
         'reason' => '',
+        'decision' => 'REJECT',
+        'highest_person_score' => null,
+        'highest_score' => null,
+        'highest_person_bbox' => null,
+        'all_scores' => [],
+        'threshold_used' => self::BACKGROUND_PERSON_CONFIDENCE_THRESHOLD,
+        'threshold' => self::BACKGROUND_PERSON_CONFIDENCE_THRESHOLD,
+        'retry_required' => true,
+        'false_positive' => false,
         'created_at' => gmdate('c'),
     ], $report);
 
@@ -2032,22 +2690,186 @@ private static function write_background_validation_report($background_path, $re
     return $report;
 }
 
-private static function validate_background_has_no_people($background_path, $brief) {
+private static function validate_background_plate_opacity($path) {
+    $report = [
+        'ok' => false,
+        'path' => $path,
+        'width' => 0,
+        'height' => 0,
+        'transparent_pixels' => 0,
+        'partial_alpha_pixels' => 0,
+        'opaque_pixels' => 0,
+        'transparent_ratio' => 0.0,
+        'partial_alpha_ratio' => 0.0,
+        'reason' => '',
+    ];
+
+    if (!function_exists('imagecreatefrompng') || !is_string($path) || !file_exists($path)) {
+        $report['reason'] = 'missing_or_unreadable_background';
+        return $report;
+    }
+
+    $img = @imagecreatefrompng($path);
+    if (!$img) {
+        $report['reason'] = 'not_readable_png';
+        return $report;
+    }
+
+    $w = imagesx($img);
+    $h = imagesy($img);
+    $report['width'] = $w;
+    $report['height'] = $h;
+
+    if ($w <= 0 || $h <= 0) {
+        imagedestroy($img);
+        $report['reason'] = 'empty_dimensions';
+        return $report;
+    }
+
+    for ($y = 0; $y < $h; $y++) {
+        for ($x = 0; $x < $w; $x++) {
+            $rgba = imagecolorat($img, $x, $y);
+            $alpha = ($rgba >> 24) & 0x7F;
+            if ($alpha >= 126) {
+                $report['transparent_pixels']++;
+            } elseif ($alpha > 0) {
+                $report['partial_alpha_pixels']++;
+            } else {
+                $report['opaque_pixels']++;
+            }
+        }
+    }
+
+    imagedestroy($img);
+
+    $total = max(1, $w * $h);
+    $report['transparent_ratio'] = $report['transparent_pixels'] / $total;
+    $report['partial_alpha_ratio'] = $report['partial_alpha_pixels'] / $total;
+    $report['ok'] = $report['transparent_ratio'] <= 0.001 && $report['partial_alpha_ratio'] <= 0.01;
+    $report['reason'] = $report['ok'] ? 'opaque_background_plate' : 'background_transparency_detected';
+
+    if (!$report['ok']) {
+        error_log('CMSG LAYERED BACKGROUND TRANSPARENCY DETECTED path=' . $path . ' transparent_ratio=' . $report['transparent_ratio'] . ' partial_alpha_ratio=' . $report['partial_alpha_ratio']);
+    }
+
+    return $report;
+}
+
+private static function background_plate_opaque_fill_color($img, $w, $h) {
+    $samples = [];
+    $step = max(1, (int)floor(max($w, $h) / 90));
+
+    for ($x = 0; $x < $w; $x += $step) {
+        $samples[] = imagecolorat($img, $x, 0);
+        $samples[] = imagecolorat($img, $x, $h - 1);
+    }
+    for ($y = 0; $y < $h; $y += $step) {
+        $samples[] = imagecolorat($img, 0, $y);
+        $samples[] = imagecolorat($img, $w - 1, $y);
+    }
+
+    $r_total = 0;
+    $g_total = 0;
+    $b_total = 0;
+    $count = 0;
+    foreach ($samples as $rgba) {
+        $alpha = ($rgba >> 24) & 0x7F;
+        if ($alpha > 110) {
+            continue;
+        }
+        $r_total += ($rgba >> 16) & 0xFF;
+        $g_total += ($rgba >> 8) & 0xFF;
+        $b_total += $rgba & 0xFF;
+        $count++;
+    }
+
+    if ($count <= 0) {
+        return [12, 10, 8];
+    }
+
+    $r = (int)round(($r_total / $count) * 0.45 + 12 * 0.55);
+    $g = (int)round(($g_total / $count) * 0.45 + 10 * 0.55);
+    $b = (int)round(($b_total / $count) * 0.45 + 8 * 0.55);
+
+    return [
+        max(8, min(96, $r)),
+        max(8, min(96, $g)),
+        max(8, min(96, $b)),
+    ];
+}
+
+private static function flatten_background_plate_opaque($src, $dest, $brief = []) {
+    if (!function_exists('imagecreatefrompng') || !function_exists('imagecreatetruecolor')) {
+        return false;
+    }
+    if (!is_string($src) || !file_exists($src) || !is_string($dest) || $dest === '') {
+        return false;
+    }
+
+    $img = @imagecreatefrompng($src);
+    if (!$img) {
+        return false;
+    }
+
+    $w = imagesx($img);
+    $h = imagesy($img);
+    if ($w <= 0 || $h <= 0) {
+        imagedestroy($img);
+        return false;
+    }
+
+    $fill_rgb = self::background_plate_opaque_fill_color($img, $w, $h);
+    $canvas = imagecreatetruecolor($w, $h);
+    if (!$canvas) {
+        imagedestroy($img);
+        return false;
+    }
+
+    imagealphablending($canvas, true);
+    imagesavealpha($canvas, false);
+    $fill = imagecolorallocatealpha($canvas, $fill_rgb[0], $fill_rgb[1], $fill_rgb[2], 0);
+    imagefilledrectangle($canvas, 0, 0, $w, $h, $fill);
+    imagecopy($canvas, $img, 0, 0, 0, 0, $w, $h);
+
+    $dir = dirname($dest);
+    if (!is_dir($dir)) {
+        wp_mkdir_p($dir);
+    }
+
+    $saved = imagepng($canvas, $dest, 6);
+    imagedestroy($canvas);
+    imagedestroy($img);
+
+    if (!$saved || !file_exists($dest) || filesize($dest) <= 0) {
+        return false;
+    }
+    @chmod($dest, 0664);
+
+    $opacity = self::validate_background_plate_opacity($dest);
+    return !empty($opacity['ok']);
+}
+
+private static function validate_background_has_no_people($background_path, $brief, $opacity_report = []) {
+    $opacity_report = is_array($opacity_report) ? $opacity_report : [];
+    $with_opacity = function($report) use ($opacity_report) {
+        return array_merge($opacity_report, is_array($report) ? $report : []);
+    };
+
     if (!is_string($background_path) || !file_exists($background_path)) {
-        return self::write_background_validation_report($background_path, [
+        return self::write_background_validation_report($background_path, $with_opacity([
             'ok' => false,
             'reason' => 'missing_background',
-        ]);
+        ]));
     }
 
     $script = plugin_dir_path(dirname(__FILE__)) . 'tools/detect-duplicate-faces.py';
     if (!file_exists($script)) {
         error_log('CMSG LAYERED BACKGROUND VALIDATION FAILED CLOSED: face_detector_missing path=' . $script);
-        return self::write_background_validation_report($background_path, [
+        return self::write_background_validation_report($background_path, $with_opacity([
             'ok' => false,
             'reason' => 'face_detector_missing',
             'detector_path' => $script,
-        ]);
+        ]));
     }
 
     $python = file_exists('/opt/cmsg-bgremove/bin/python') ? '/opt/cmsg-bgremove/bin/python' : 'python3';
@@ -2058,37 +2880,36 @@ private static function validate_background_has_no_people($background_path, $bri
         . ' ' . escapeshellarg((string)self::$duplicate_face_similarity_threshold)
         . ' 2>&1';
     $raw = shell_exec($cmd);
-    $decoded = json_decode(trim((string)$raw), true);
+    $decoded = self::decode_detector_json_output($raw);
 
     if (!is_array($decoded) || empty($decoded['ok'])) {
         error_log('CMSG LAYERED BACKGROUND VALIDATION FAILED CLOSED: face_detector_unavailable raw=' . (is_string($raw) ? substr($raw, 0, 300) : ''));
-        return self::write_background_validation_report($background_path, [
+        return self::write_background_validation_report($background_path, $with_opacity([
             'ok' => false,
             'reason' => 'face_detector_unavailable',
             'detector_path' => $script,
             'raw' => is_string($raw) ? substr($raw, 0, 1000) : '',
             'decoded' => is_array($decoded) ? $decoded : null,
-        ]);
+        ]));
     }
 
     $face_count = (int)($decoded['face_count'] ?? ($decoded['detected_face_count'] ?? 0));
-    if ($face_count > 0) {
+    $face_decision = self::background_face_detection_decision($decoded);
+    if (empty($face_decision['ok'])) {
         error_log('CMSG LAYERED BACKGROUND HUMAN CONTENT DETECTED faces=' . $face_count . ' path=' . $background_path);
-        return self::write_background_validation_report($background_path, [
-            'ok' => false,
-            'reason' => 'face_detected',
+        return self::write_background_validation_report($background_path, $with_opacity(array_merge($face_decision, [
             'faces_detected' => $face_count,
             'people_detected' => 0,
             'silhouettes_detected' => 0,
             'detector' => $decoded['method'] ?? 'unknown',
             'face_detector' => $decoded,
-        ]);
+        ])));
     }
 
     $person_script = plugin_dir_path(dirname(__FILE__)) . 'tools/detect-people.py';
     if (!file_exists($person_script)) {
         error_log('CMSG LAYERED BACKGROUND VALIDATION FAILED CLOSED: people_detector_missing path=' . $person_script);
-        return self::write_background_validation_report($background_path, [
+        return self::write_background_validation_report($background_path, $with_opacity([
             'ok' => false,
             'reason' => 'people_detector_missing',
             'faces_detected' => 0,
@@ -2096,7 +2917,7 @@ private static function validate_background_has_no_people($background_path, $bri
             'silhouettes_detected' => 0,
             'face_detector' => $decoded,
             'detector_path' => $person_script,
-        ]);
+        ]));
     }
 
     $person_cmd = escapeshellcmd($python)
@@ -2104,10 +2925,10 @@ private static function validate_background_has_no_people($background_path, $bri
         . ' ' . escapeshellarg($background_path)
         . ' 2>&1';
     $person_raw = shell_exec($person_cmd);
-    $person_decoded = json_decode(trim((string)$person_raw), true);
+    $person_decoded = self::decode_detector_json_output($person_raw);
     if (!is_array($person_decoded) || empty($person_decoded['ok'])) {
         error_log('CMSG LAYERED BACKGROUND VALIDATION FAILED CLOSED: people_detector_unavailable raw=' . (is_string($person_raw) ? substr($person_raw, 0, 300) : ''));
-        return self::write_background_validation_report($background_path, [
+        return self::write_background_validation_report($background_path, $with_opacity([
             'ok' => false,
             'reason' => 'people_detector_unavailable',
             'faces_detected' => 0,
@@ -2116,54 +2937,504 @@ private static function validate_background_has_no_people($background_path, $bri
             'face_detector' => $decoded,
             'raw' => is_string($person_raw) ? substr($person_raw, 0, 1000) : '',
             'decoded' => is_array($person_decoded) ? $person_decoded : null,
-        ]);
+        ]));
     }
 
     $person_count = (int)($person_decoded['person_count'] ?? ($person_decoded['people_detected'] ?? 0));
     $silhouette_count = (int)($person_decoded['silhouette_count'] ?? ($person_decoded['silhouettes_detected'] ?? 0));
+    $people_decision = self::background_people_detection_decision($person_decoded);
     if ($person_count > 0 || $silhouette_count > 0) {
-        error_log('CMSG LAYERED BACKGROUND HUMAN CONTENT DETECTED people=' . $person_count . ' silhouettes=' . $silhouette_count . ' path=' . $background_path);
-        return self::write_background_validation_report($background_path, [
+        error_log('CMSG LAYERED BACKGROUND HUMAN VALIDATION people=' . $person_count . ' silhouettes=' . $silhouette_count . ' highest_score=' . ($people_decision['highest_person_score'] ?? 'null') . ' threshold=' . ($people_decision['threshold_used'] ?? self::BACKGROUND_PERSON_CONFIDENCE_THRESHOLD) . ' decision=' . ($people_decision['decision'] ?? 'REJECT') . ' reason=' . ($people_decision['reason'] ?? '') . ' path=' . $background_path);
+    }
+    if (empty($people_decision['ok'])) {
+        return self::write_background_validation_report($background_path, $with_opacity(array_merge($people_decision, [
             'ok' => false,
-            'reason' => 'person_or_silhouette_detected',
             'faces_detected' => 0,
-            'people_detected' => $person_count,
-            'silhouettes_detected' => $silhouette_count,
             'face_detector' => $decoded,
             'people_detector' => $person_decoded,
-        ]);
+        ])));
     }
 
-    return self::write_background_validation_report($background_path, [
+    return self::write_background_validation_report($background_path, $with_opacity(array_merge($people_decision, [
         'ok' => true,
-        'reason' => 'no_human_content_detected',
         'faces_detected' => 0,
-        'people_detected' => 0,
-        'silhouettes_detected' => 0,
         'face_detector' => $decoded,
         'people_detector' => $person_decoded,
         'detector' => $decoded['method'] ?? 'unknown',
-    ]);
+    ])));
+}
+
+private static function background_people_detection_decision($person_decoded) {
+    $person_decoded = is_array($person_decoded) ? $person_decoded : [];
+    if (empty($person_decoded['ok'])) {
+        return [
+            'ok' => false,
+            'decision' => 'REJECT',
+            'reason' => 'people_detector_unavailable',
+            'people_detected' => 0,
+            'silhouettes_detected' => 0,
+            'person_count' => 0,
+            'silhouette_count' => 0,
+            'highest_person_score' => null,
+            'highest_score' => null,
+            'highest_person_bbox' => null,
+            'all_scores' => [],
+            'threshold_used' => self::BACKGROUND_PERSON_CONFIDENCE_THRESHOLD,
+            'threshold' => self::BACKGROUND_PERSON_CONFIDENCE_THRESHOLD,
+            'retry_required' => true,
+            'false_positive' => false,
+        ];
+    }
+    $threshold = (float)self::BACKGROUND_PERSON_CONFIDENCE_THRESHOLD;
+    $people = $person_decoded['people'] ?? [];
+    $people = is_array($people) ? $people : [];
+    $person_count = (int)($person_decoded['person_count'] ?? ($person_decoded['people_detected'] ?? count($people)));
+    $silhouette_count = (int)($person_decoded['silhouette_count'] ?? ($person_decoded['silhouettes_detected'] ?? 0));
+    if ($person_count > 0 && empty($people)) {
+        return [
+            'ok' => false,
+            'decision' => 'REJECT',
+            'reason' => 'people_detector_invalid',
+            'people_detected' => $person_count,
+            'silhouettes_detected' => $silhouette_count,
+            'person_count' => $person_count,
+            'silhouette_count' => $silhouette_count,
+            'highest_person_score' => null,
+            'highest_score' => null,
+            'highest_person_bbox' => null,
+            'all_scores' => [],
+            'threshold_used' => $threshold,
+            'threshold' => $threshold,
+            'retry_required' => true,
+            'false_positive' => false,
+        ];
+    }
+    $scores = [];
+    $highest_score = null;
+    $highest_bbox = null;
+    $strong_person_detected = false;
+
+    foreach ($people as $person) {
+        if (!is_array($person)) continue;
+        $score = isset($person['score']) && is_numeric($person['score']) ? (float)$person['score'] : 0.0;
+        $scores[] = round($score, 4);
+        if ($highest_score === null || $score > $highest_score) {
+            $highest_score = $score;
+            $highest_bbox = isset($person['bbox']) && is_array($person['bbox']) ? array_values($person['bbox']) : null;
+        }
+        if ($score >= $threshold) {
+            $strong_person_detected = true;
+        }
+    }
+
+    $reject = $silhouette_count > 0 || $strong_person_detected;
+    $false_positive = $person_count > 0 && !$strong_person_detected && $silhouette_count <= 0;
+    $reason = 'no_human_content_detected';
+    if ($silhouette_count > 0) {
+        $reason = 'silhouette_detected';
+    } elseif ($strong_person_detected) {
+        $reason = 'strong_person_detected';
+    } elseif ($false_positive) {
+        $reason = 'low_confidence_person_detection';
+    }
+
+    return [
+        'ok' => !$reject,
+        'decision' => $reject ? 'REJECT' : 'ALLOW',
+        'reason' => $reason,
+        'people_detected' => $person_count,
+        'silhouettes_detected' => $silhouette_count,
+        'person_count' => $person_count,
+        'silhouette_count' => $silhouette_count,
+        'highest_person_score' => $highest_score === null ? null : round($highest_score, 4),
+        'highest_score' => $highest_score === null ? null : round($highest_score, 4),
+        'highest_person_bbox' => $highest_bbox,
+        'all_scores' => $scores,
+        'threshold_used' => $threshold,
+        'threshold' => $threshold,
+        'retry_required' => $reject,
+        'false_positive' => $false_positive,
+    ];
+}
+
+private static function background_face_detection_decision($face_decoded) {
+    $face_decoded = is_array($face_decoded) ? $face_decoded : [];
+    if (empty($face_decoded['ok'])) {
+        return [
+            'ok' => false,
+            'decision' => 'REJECT',
+            'reason' => 'face_detector_unavailable',
+            'faces_detected' => 0,
+            'retry_required' => true,
+            'false_positive' => false,
+        ];
+    }
+
+    $face_count = (int)($face_decoded['face_count'] ?? ($face_decoded['detected_face_count'] ?? 0));
+    if ($face_count > 0) {
+        return [
+            'ok' => false,
+            'decision' => 'REJECT',
+            'reason' => 'face_detected',
+            'faces_detected' => $face_count,
+            'retry_required' => true,
+            'false_positive' => false,
+        ];
+    }
+
+    return [
+        'ok' => true,
+        'decision' => 'ALLOW',
+        'reason' => 'no_face_detected',
+        'faces_detected' => 0,
+        'retry_required' => false,
+        'false_positive' => false,
+    ];
+}
+
+private static function poster_diagnostic_log_path($filename) {
+    $filename = basename((string)$filename);
+    if ($filename === '') {
+        $filename = 'poster-diagnostics.log';
+    }
+    if (defined('WP_CONTENT_DIR') && WP_CONTENT_DIR) {
+        return rtrim(WP_CONTENT_DIR, '/\\') . '/' . $filename;
+    }
+    if (defined('ABSPATH') && ABSPATH) {
+        return rtrim(ABSPATH, '/\\') . '/wp-content/' . $filename;
+    }
+    return $filename;
+}
+
+private static function append_poster_diagnostic_log($filename, $entry) {
+    $path = self::poster_diagnostic_log_path($filename);
+    $entry = is_array($entry) ? $entry : ['message' => (string)$entry];
+    if (empty($entry['timestamp'])) {
+        $entry['timestamp'] = gmdate('c');
+    }
+    $line = wp_json_encode($entry, JSON_UNESCAPED_SLASHES) . "\n";
+    $ok = @file_put_contents($path, $line, FILE_APPEND);
+    if ($ok !== false) {
+        @chmod($path, 0664);
+    }
+    return $ok !== false;
+}
+
+private static function wp_error_diagnostic_payload($error) {
+    if (!is_wp_error($error)) {
+        return [
+            'error_code' => '',
+            'error_message' => '',
+            'error_data' => null,
+        ];
+    }
+    $code = $error->get_error_code();
+    return [
+        'error_code' => (string)$code,
+        'error_message' => (string)$error->get_error_message($code),
+        'error_data' => $error->get_error_data($code),
+    ];
+}
+
+private static function diagnostic_json_file_state($path) {
+    $path = is_string($path) ? $path : '';
+    $state = [
+        'path' => $path,
+        'expected_path' => $path,
+        'exists' => false,
+        'filesize' => null,
+        'json_decode_ok' => false,
+        'json_error' => null,
+        'decoded' => null,
+    ];
+    if ($path === '') {
+        $state['json_error'] = 'missing_path';
+        return $state;
+    }
+    $state['exists'] = file_exists($path);
+    if (!$state['exists']) {
+        $state['json_error'] = 'file_missing';
+        return $state;
+    }
+    $state['filesize'] = @filesize($path);
+    $raw = @file_get_contents($path);
+    if ($raw === false) {
+        $state['json_error'] = 'read_failed';
+        return $state;
+    }
+    $decoded = json_decode($raw, true);
+    $state['json_decode_ok'] = is_array($decoded);
+    $state['json_error'] = json_last_error_msg();
+    $state['decoded'] = is_array($decoded) ? $decoded : null;
+    return $state;
+}
+
+private static function identity_actor_context($context = []) {
+    $defaults = [
+        'function' => 'prepare_identity_actor_layers',
+        'actor_index' => null,
+        'actor_id' => '',
+        'actor_label' => '',
+        'actor_source_path' => '',
+        'source_image' => '',
+        'cutout_path' => '',
+        'raw_cutout_path' => '',
+        'final_cutout_path' => '',
+        'destination_layer_path' => '',
+        'identity_anchor_path' => '',
+        'source_selection_path' => '',
+        'repair_report_path' => '',
+        'alpha_report_path' => '',
+        'face_anchor_path' => '',
+    ];
+    return array_merge($defaults, is_array($context) ? $context : []);
+}
+
+private static function set_identity_actor_diagnostic_context($context = []) {
+    self::$last_identity_actor_diagnostic_context = self::identity_actor_context($context);
+    return self::$last_identity_actor_diagnostic_context;
+}
+
+private static function append_identity_actor_error_diagnostic($error, $context = [], $extra = []) {
+    $context = self::identity_actor_context(array_merge(self::$last_identity_actor_diagnostic_context, is_array($context) ? $context : []));
+    $payload = array_merge(
+        [
+            'event' => 'identity_actor_wp_error',
+            'function' => $context['function'],
+            'actor_index' => $context['actor_index'],
+            'actor_id' => $context['actor_id'],
+            'actor_label' => $context['actor_label'],
+            'source_image' => $context['source_image'] ?: $context['actor_source_path'],
+            'actor_source_path' => $context['actor_source_path'],
+            'cutout_path' => $context['cutout_path'],
+            'raw_cutout_path' => $context['raw_cutout_path'],
+            'final_cutout_path' => $context['final_cutout_path'],
+            'destination_layer_path' => $context['destination_layer_path'],
+            'identity_anchor_path' => $context['identity_anchor_path'],
+            'identity_anchor_json' => self::diagnostic_json_file_state($context['identity_anchor_path']),
+            'source_selection_path' => $context['source_selection_path'],
+            'source_selection_json' => self::diagnostic_json_file_state($context['source_selection_path']),
+            'repair_report_path' => $context['repair_report_path'],
+            'repair_report_json' => self::diagnostic_json_file_state($context['repair_report_path']),
+            'alpha_report_path' => $context['alpha_report_path'],
+            'alpha_report_json' => self::diagnostic_json_file_state($context['alpha_report_path']),
+            'face_anchor_path' => $context['face_anchor_path'],
+            'face_anchor_json' => self::diagnostic_json_file_state($context['face_anchor_path']),
+        ],
+        self::wp_error_diagnostic_payload($error),
+        is_array($extra) ? $extra : []
+    );
+    return self::append_poster_diagnostic_log('poster-identity-debug.log', $payload);
+}
+
+private static function poster_actor_trace_path() {
+    $base = defined('WP_CONTENT_DIR') ? WP_CONTENT_DIR : (defined('ABSPATH') ? rtrim(ABSPATH, '/\\') . '/wp-content' : __DIR__);
+    return rtrim($base, '/\\') . '/poster-actor-trace.log';
+}
+
+private static function poster_actor_trace_sanitize($value, $depth = 0) {
+    if ($depth > 5) {
+        return '[max-depth]';
+    }
+    if (function_exists('is_wp_error') && is_wp_error($value)) {
+        return self::poster_actor_trace_wp_error($value);
+    }
+    if (is_array($value)) {
+        $out = [];
+        $count = 0;
+        foreach ($value as $key => $item) {
+            $count++;
+            if ($count > 80) {
+                $out['__truncated_items'] = count($value) - 80;
+                break;
+            }
+            $safe_key = is_string($key) ? $key : (string)$key;
+            if (preg_match('/authorization|api[_-]?key|token|secret|password|base64|b64_json/i', $safe_key)) {
+                $out[$safe_key] = '[redacted]';
+                continue;
+            }
+            $out[$safe_key] = self::poster_actor_trace_sanitize($item, $depth + 1);
+        }
+        return $out;
+    }
+    if (is_object($value)) {
+        return '[object ' . get_class($value) . ']';
+    }
+    if (is_resource($value)) {
+        return '[resource]';
+    }
+    if (is_string($value)) {
+        if (preg_match('/authorization|api[_-]?key|token|secret|password|base64|b64_json/i', $value)) {
+            return '[redacted-string]';
+        }
+        $length = strlen($value);
+        if ($length > 900) {
+            return substr($value, 0, 420) . '...[truncated ' . $length . ' bytes]...' . substr($value, -180);
+        }
+        return $value;
+    }
+    return $value;
+}
+
+private static function poster_actor_trace_file_state($path) {
+    $path = is_string($path) ? $path : '';
+    $state = [
+        'path' => $path,
+        'exists' => false,
+        'readable' => false,
+        'filesize' => null,
+        'dimensions' => null,
+    ];
+    if ($path === '') {
+        return $state;
+    }
+    $state['exists'] = file_exists($path);
+    $state['readable'] = is_readable($path);
+    if ($state['exists']) {
+        $size = @filesize($path);
+        $state['filesize'] = $size === false ? null : $size;
+        $dims = @getimagesize($path);
+        if (is_array($dims)) {
+            $state['dimensions'] = [
+                'width' => (int)($dims[0] ?? 0),
+                'height' => (int)($dims[1] ?? 0),
+                'mime' => (string)($dims['mime'] ?? ''),
+            ];
+        }
+    }
+    return $state;
+}
+
+private static function poster_actor_trace_wp_error($error) {
+    if (!function_exists('is_wp_error') || !is_wp_error($error)) {
+        return null;
+    }
+    $data = [];
+    if (method_exists($error, 'get_error_codes')) {
+        foreach ((array)$error->get_error_codes() as $code) {
+            $data[$code] = method_exists($error, 'get_all_error_data') ? $error->get_all_error_data($code) : $error->get_error_data($code);
+        }
+    }
+    return [
+        'codes' => method_exists($error, 'get_error_codes') ? $error->get_error_codes() : [$error->get_error_code()],
+        'messages' => method_exists($error, 'get_error_messages') ? $error->get_error_messages() : [$error->get_error_message()],
+        'data' => $data,
+    ];
+}
+
+private static function poster_actor_trace($code, $message = '', $context = []) {
+    try {
+        $entry = gmdate('c')
+            . ' pid=' . (function_exists('getmypid') ? (int)getmypid() : 0)
+            . ' memory=' . (function_exists('memory_get_usage') ? (int)memory_get_usage(true) : 0)
+            . ' peak=' . (function_exists('memory_get_peak_usage') ? (int)memory_get_peak_usage(true) : 0)
+            . ' ' . preg_replace('/[^A-Z0-9_:-]/', '_', strtoupper((string)$code))
+            . ' ' . str_replace(["\r", "\n"], ' ', (string)$message)
+            . ' ' . json_encode(self::poster_actor_trace_sanitize(is_array($context) ? $context : ['context' => $context]), JSON_UNESCAPED_SLASHES)
+            . "\n";
+        @file_put_contents(self::poster_actor_trace_path(), $entry, FILE_APPEND | LOCK_EX);
+    } catch (Throwable $e) {
+        return;
+    }
+}
+
+private static function register_poster_actor_trace_shutdown($context = []) {
+    if (self::$poster_actor_trace_shutdown_registered) {
+        return;
+    }
+    self::$poster_actor_trace_shutdown_registered = true;
+    self::poster_actor_trace('SHUTDOWN_REGISTERED', 'Actor trace shutdown handler registered.', $context);
+    register_shutdown_function(function() use ($context) {
+        try {
+            CMSG_Poster_AI::poster_actor_trace('SHUTDOWN_ENTER', 'Poster actor trace shutdown handler entered.', $context);
+            $last = error_get_last();
+            if (is_array($last)) {
+                CMSG_Poster_AI::poster_actor_trace('SHUTDOWN_LAST_ERROR', 'Last PHP error captured at shutdown.', [
+                    'type' => $last['type'] ?? null,
+                    'message' => $last['message'] ?? '',
+                    'file' => $last['file'] ?? '',
+                    'line' => $last['line'] ?? null,
+                ]);
+            } else {
+                CMSG_Poster_AI::poster_actor_trace('SHUTDOWN_CLEAN', 'No last PHP error at shutdown.', $context);
+            }
+        } catch (Throwable $e) {
+            return;
+        }
+    });
 }
 
 private static function prepare_campaign_actor_cutouts($brief, $layer_dir, $actor_records = null) {
+    $path_started = microtime(true);
+    self::poster_actor_trace('ACTOR_PATH_ENTER', 'Entered prepare_campaign_actor_cutouts().', [
+        'layer_dir' => $layer_dir,
+        'actor_records_supplied' => is_array($actor_records),
+        'supplied_actor_record_count' => is_array($actor_records) ? count($actor_records) : null,
+    ]);
     $records = is_array($actor_records) ? $actor_records : self::accepted_actor_source_records($brief);
 
+    self::poster_actor_trace('ACTOR_COLLECTION_BEGIN', 'Actor records resolved for cutout preparation.', [
+        'record_count' => count($records),
+        'layer_dir' => $layer_dir,
+    ]);
     foreach ($records as $record) {
+        self::poster_actor_trace('ACTOR_COLLECTION_RECORD', 'Validating actor registry record.', [
+            'actor_id' => sanitize_key($record['actor_id'] ?? ''),
+            'actor_index' => (int)($record['actor_index'] ?? -1),
+            'source_type' => (string)($record['source_type'] ?? ''),
+            'accepted_as_actor' => !empty($record['accepted_as_actor']),
+            'source_path' => self::poster_actor_trace_file_state((string)($record['source_path'] ?? '')),
+        ]);
         if (empty($record['accepted_as_actor']) || !in_array($record['source_type'] ?? '', ['principal_cast', 'legacy_cast'], true)) {
+            self::poster_actor_trace('ACTOR_WP_ERROR', 'Non-cast source reached actor registry validation.', [
+                'record' => $record,
+            ]);
             error_log('CMSG LAYERED QUALITY FAIL: non_cast_asset_in_actor_registry source_type=' . sanitize_text_field($record['source_type'] ?? '') . ' path=' . sanitize_text_field($record['source_path'] ?? ''));
             return [];
         }
     }
 
+    self::poster_actor_trace('IDENTITY_LAYERS_CALL_BEFORE', 'Calling prepare_identity_actor_layers().', [
+        'record_count' => count($records),
+        'layer_dir' => $layer_dir,
+    ]);
+    $identity_started = microtime(true);
     $layers = self::prepare_identity_actor_layers($records, $layer_dir);
+    self::poster_actor_trace('IDENTITY_LAYERS_CALL_AFTER', 'Returned from prepare_identity_actor_layers().', [
+        'elapsed_ms' => (int)round((microtime(true) - $identity_started) * 1000),
+        'result_type' => is_wp_error($layers) ? 'WP_Error' : gettype($layers),
+        'count' => is_array($layers) ? count($layers) : null,
+        'wp_error' => self::poster_actor_trace_wp_error($layers),
+    ]);
+    if (is_wp_error($layers)) {
+        self::poster_actor_trace('ACTOR_WP_ERROR', 'prepare_identity_actor_layers() returned WP_Error.', [
+            'wp_error' => self::poster_actor_trace_wp_error($layers),
+            'last_identity_actor_diagnostic_context' => self::$last_identity_actor_diagnostic_context,
+        ]);
+        $context = self::identity_actor_context(self::$last_identity_actor_diagnostic_context);
+        self::append_poster_diagnostic_log('poster-route-test.log', array_merge([
+            'event' => 'prepare_identity_actor_layers_wp_error',
+            'function' => 'prepare_campaign_actor_cutouts',
+            'actor_index' => $context['actor_index'],
+            'actor_label' => $context['actor_label'],
+            'actor_source_path' => $context['actor_source_path'],
+            'identity_anchor_path' => $context['identity_anchor_path'],
+            'identity_anchor_json' => self::diagnostic_json_file_state($context['identity_anchor_path']),
+        ], self::wp_error_diagnostic_payload($layers)));
+        error_log('CMSG PROFESSIONAL RECOVERY QUALITY FAIL code=' . $layers->get_error_code() . ' message=' . $layers->get_error_message());
+        return $layers;
+    }
     foreach ($layers as $layer) {
         error_log('CMSG LAYERED ACTOR CUTOUT: actor=' . sanitize_text_field($layer['label'] ?? '') . ' source_type=' . sanitize_text_field($layer['source_type'] ?? '') . ' source=' . sanitize_text_field($layer['source'] ?? '') . ' layer=' . sanitize_text_field($layer['layer'] ?? '') . ' fallback=' . (!empty($layer['fallback_used']) ? 'yes' : 'no'));
     }
+    self::poster_actor_trace('ACTOR_PATH_EXIT', 'prepare_campaign_actor_cutouts() completed.', [
+        'elapsed_ms' => (int)round((microtime(true) - $path_started) * 1000),
+        'layer_count' => is_array($layers) ? count($layers) : null,
+    ]);
     return $layers;
 }
 
-private static function build_campaign_layer_manifest($brief, $background_path, $actor_layers, $variant) {
+private static function build_campaign_layer_manifest($brief, $background_path, $actor_layers, $variant, $prop_layers = []) {
     $variant = sanitize_key($variant ?: 'vertical');
     $vertical_slots = self::campaign_variant_slot_map($brief, count($actor_layers), 'vertical');
     $banner_slots = self::campaign_variant_slot_map($brief, count($actor_layers), 'banner');
@@ -2183,6 +3454,16 @@ private static function build_campaign_layer_manifest($brief, $background_path, 
         'title' => sanitize_text_field($brief['title'] ?? ($brief['movie_title'] ?? 'Untitled Film')),
         'created_at' => gmdate('c'),
         'source_mode' => 'layered_campaign',
+        'brief' => [
+            'title' => sanitize_text_field($brief['title'] ?? ($brief['movie_title'] ?? '')),
+            'genre' => sanitize_text_field($brief['genre'] ?? ''),
+            'mood' => sanitize_text_field($brief['mood'] ?? ''),
+            'poster_layout' => self::poster_layout_key($brief),
+            'poster_description' => sanitize_textarea_field($brief['poster_description'] ?? ($brief['description'] ?? '')),
+            'cast_members' => self::normalized_cast_members($brief),
+            'poster_assets' => array_values((array)($brief['poster_assets'] ?? [])),
+            'professional_recovery_template' => self::professional_recovery_template_key($brief, count($actor_layers)),
+        ],
         'immutable' => true,
         'locks' => [
             'actor_positions' => true,
@@ -2234,6 +3515,7 @@ private static function build_campaign_layer_manifest($brief, $background_path, 
     ];
 
     $seen_indexes = [];
+    $cast_members = self::normalized_cast_members($brief);
     foreach (array_values($actor_layers) as $i => $layer) {
         $source_type = self::actor_registry_source_type($layer['source_type'] ?? 'legacy_cast');
         if (empty($layer['accepted_as_actor']) || !in_array($source_type, ['principal_cast', 'legacy_cast'], true)) {
@@ -2249,6 +3531,9 @@ private static function build_campaign_layer_manifest($brief, $background_path, 
         $seen_indexes[$actor_index] = true;
         $actor_id = self::campaign_actor_id($actor_index);
         $slot = $slots[$actor_id] ?? ['x' => 0.50, 'y' => 0.15, 'w' => 0.36, 'h' => 0.46, 'z_index' => $i + 10];
+        $cast_member = is_array($cast_members[$actor_index] ?? null) ? $cast_members[$actor_index] : [];
+        $actor_role = self::normalize_campaign_actor_role($cast_member['role'] ?? ($slot['role'] ?? 'supporting'), $actor_index);
+        $actor_instruction = sanitize_textarea_field($cast_member['instruction'] ?? ($cast_member['character_notes'] ?? ''));
         $manifest['layers'][] = [
             'type' => 'actor',
             'actor_id' => $actor_id,
@@ -2261,17 +3546,45 @@ private static function build_campaign_layer_manifest($brief, $background_path, 
             'source_hash' => self::campaign_file_hash($layer['source'] ?? ''),
             'cutout_path' => $layer['cutout'] ?? '',
             'layer_path' => $layer['layer'] ?? '',
+            'final_cutout_path' => $layer['final_cutout'] ?? ($layer['cutout'] ?? ''),
+            'face_anchor_path' => $layer['face_anchor'] ?? '',
+            'matte_report_path' => $layer['matte_report'] ?? '',
+            'identity_anchor_path' => $layer['identity_anchor_path'] ?? '',
+            'source_selection_path' => $layer['source_selection_path'] ?? '',
+            'repair_report_path' => $layer['repair_report_path'] ?? '',
+            'source_selection' => $layer['source_selection'] ?? [],
+            'repair_report' => $layer['repair_report'] ?? [],
             'fallback_used' => !empty($layer['fallback_used']),
             'x' => (float)($slot['x'] ?? 0.50),
             'y' => (float)($slot['y'] ?? 0.15),
             'w' => (float)($slot['w'] ?? 0.36),
             'h' => (float)($slot['h'] ?? 0.46),
             'z' => (int)($slot['z_index'] ?? ($i + 10)),
-            'role' => sanitize_key($slot['role'] ?? ''),
+            'role' => $actor_role,
+            'actor_instruction' => $actor_instruction,
+            'instruction_directives' => self::parse_actor_instruction_directives($actor_instruction),
             'locked_identity' => true,
             'placement_locked' => true,
             'scale_locked' => true,
             'depth_locked' => true,
+        ];
+    }
+
+    foreach (array_values((array)$prop_layers) as $prop_index => $prop_layer) {
+        if (!is_array($prop_layer) || empty($prop_layer['layer_path'])) continue;
+        $manifest['layers'][] = [
+            'type' => 'prop',
+            'prop_id' => sanitize_key($prop_layer['prop_id'] ?? ('prop_' . ($prop_index + 1))),
+            'prop_type' => sanitize_key($prop_layer['prop_type'] ?? 'visual_reference'),
+            'source_path' => (string)($prop_layer['source_path'] ?? ''),
+            'layer_path' => (string)($prop_layer['layer_path'] ?? ''),
+            'mask_path' => (string)($prop_layer['mask_path'] ?? ''),
+            'integrity_report_path' => (string)($prop_layer['integrity_report_path'] ?? ''),
+            'required' => !empty($prop_layer['required']),
+            'bounds' => (array)($prop_layer['bounds'] ?? ['x' => 0.18, 'y' => 0.73, 'w' => 0.64, 'h' => 0.20]),
+            'z' => (int)($prop_layer['z'] ?? 65),
+            'locked_identity' => true,
+            'placement_locked' => true,
         ];
     }
 
@@ -2283,6 +3596,380 @@ private static function build_campaign_layer_manifest($brief, $background_path, 
     ];
 
     return $manifest;
+}
+
+private static function professional_recovery_template_key($brief, $actor_count = 0) {
+    $requested = sanitize_key($brief['professional_recovery_template'] ?? ($brief['poster_recovery_template'] ?? ''));
+    $allowed = ['prestige_ensemble_pyramid', 'cinematic_four_character_arc', 'character_over_environment'];
+    return in_array($requested, $allowed, true) ? $requested : self::PROFESSIONAL_RECOVERY_DEFAULT_TEMPLATE;
+}
+
+private static function extract_background_element_evidence($brief) {
+    $fields = [
+        'poster_description' => $brief['poster_description'] ?? ($brief['description'] ?? ''),
+        'scene_direction' => $brief['scene_direction'] ?? '',
+        'setting' => $brief['setting'] ?? '',
+        'synopsis' => $brief['synopsis'] ?? '',
+        'poster_asset_references' => wp_json_encode($brief['poster_asset_references'] ?? []),
+        'poster_assets' => wp_json_encode($brief['poster_assets'] ?? []),
+    ];
+    $joined = strtolower(implode("\n", array_map('wp_strip_all_tags', array_map('strval', $fields))));
+    $supported = [];
+    $keywords = [
+        'village' => ['village', 'rural', 'compound'],
+        'city skyline' => ['city', 'skyline', 'lagos', 'urban'],
+        'road' => ['road', 'street', 'highway'],
+        'forest' => ['forest', 'woods', 'jungle'],
+        'vehicle foreground' => ['car', 'vehicle', 'automobile', 'taxi'],
+        'storm sky' => ['storm', 'cloud', 'rain'],
+    ];
+    foreach ($keywords as $element => $needles) {
+        foreach ($needles as $needle) {
+            if ($needle !== '' && strpos($joined, $needle) !== false) {
+                $supported[$element] = true;
+                break;
+            }
+        }
+    }
+    $forbidden = ['church', 'cathedral', 'chapel', 'cross', 'graveyard', 'monastery', 'mosque', 'temple', 'shrine', 'castle', 'palace'];
+    $excluded = [];
+    foreach ($forbidden as $term) {
+        if (strpos($joined, $term) === false) $excluded[] = $term;
+    }
+    return [
+        'positive_elements' => array_keys($supported),
+        'excluded_elements' => $excluded,
+        'evidence' => $fields,
+        'scene_direction_present' => trim((string)($fields['poster_description'] ?? '')) !== '',
+        'setting_present' => trim((string)($fields['setting'] ?? '')) !== '',
+        'title_used_as_environment_evidence' => false,
+    ];
+}
+
+private static function build_genre_neutral_background_fallback($brief) {
+    $genre = strtolower(sanitize_text_field($brief['genre'] ?? ''));
+    if (strpos($genre, 'fantasy') !== false) return 'atmospheric fantasy environment without unsupported architecture, painterly depth, cinematic sky, textured ground, and room for cast layers';
+    if (strpos($genre, 'romance') !== false) return 'cinematic emotionally warm environment with soft depth and restrained production design';
+    if (strpos($genre, 'thriller') !== false) return 'restrained dramatic environment with tension, shadow, and believable spatial depth';
+    if (strpos($genre, 'comedy') !== false) return 'bright clean cinematic environment with optimistic color and open negative space';
+    return 'neutral cinematic atmospheric environment with professional lighting and clean depth';
+}
+
+private static function background_prompt_audit_path($background_path) {
+    return preg_replace('/\.png$/i', '-background-prompt-audit.json', (string)$background_path);
+}
+
+private static function background_prompt_audit($brief, $prompt) {
+    $audit = self::extract_background_element_evidence(is_array($brief) ? $brief : []);
+    $audit['final_prompt'] = (string)$prompt;
+    return $audit;
+}
+
+private static function write_background_prompt_audit($path, $audit) {
+    if (!is_string($path) || $path === '') return false;
+    file_put_contents($path, wp_json_encode(is_array($audit) ? $audit : [], JSON_PRETTY_PRINT));
+    @chmod($path, 0664);
+    return file_exists($path) && filesize($path) > 0;
+}
+
+private static function prepare_actor_identity_anchor($record, $identity_anchor_path) {
+    $actor_index = (int)($record['actor_index'] ?? 0);
+    $started = microtime(true);
+    self::poster_actor_trace('IDENTITY_ANCHOR_TOOL_BEGIN', 'Preparing actor identity anchor with analyzer.', [
+        'actor_id' => sanitize_key($record['actor_id'] ?? ''),
+        'actor_index' => $actor_index,
+        'source' => self::poster_actor_trace_file_state((string)($record['source_path'] ?? '')),
+        'identity_anchor_path' => (string)$identity_anchor_path,
+        'crop_output' => preg_replace('/\.json$/i', '-crop.png', (string)$identity_anchor_path),
+    ]);
+    $report = self::run_poster_json_tool('analyze-poster-actor-sources.py', [
+        'mode' => 'identity-anchor',
+        'actor-id' => sanitize_key($record['actor_id'] ?? ''),
+        'actor-index' => $actor_index,
+        'source' => (string)($record['source_path'] ?? ''),
+        'output' => $identity_anchor_path,
+        'crop-output' => preg_replace('/\.json$/i', '-crop.png', (string)$identity_anchor_path),
+        'threshold' => self::PROFESSIONAL_RECOVERY_IDENTITY_MATCH_THRESHOLD,
+        'margin' => self::PROFESSIONAL_RECOVERY_IDENTITY_MATCH_MARGIN,
+    ]);
+    self::poster_actor_trace('IDENTITY_ANCHOR_TOOL_END', 'Actor identity anchor analyzer returned.', [
+        'actor_id' => sanitize_key($record['actor_id'] ?? ''),
+        'actor_index' => $actor_index,
+        'elapsed_ms' => (int)round((microtime(true) - $started) * 1000),
+        'identity_anchor_path' => self::poster_actor_trace_file_state($identity_anchor_path),
+        'report_keys' => is_array($report) ? array_keys($report) : [],
+        'identity_anchor_valid' => is_array($report) ? ($report['identity_anchor_valid'] ?? null) : null,
+        'failure_reason' => is_array($report) ? ($report['failure_reason'] ?? null) : null,
+    ]);
+    self::write_actor_alpha_report($identity_anchor_path, $report);
+    if (empty($report['identity_anchor_valid'])) {
+        self::poster_actor_trace('ACTOR_WP_ERROR', 'Actor identity anchor unavailable.', [
+            'actor_id' => sanitize_key($record['actor_id'] ?? ''),
+            'actor_index' => $actor_index,
+            'identity_anchor_path' => self::poster_actor_trace_file_state($identity_anchor_path),
+            'report' => $report,
+        ]);
+        return new WP_Error(sanitize_key($report['failure_reason'] ?? 'actor_identity_anchor_unavailable'), 'Actor identity anchor unavailable.');
+    }
+    error_log('CMSG PROFESSIONAL RECOVERY ACTOR SOURCE actor_id=' . sanitize_key($record['actor_id'] ?? '') . ' identity_anchor=' . sanitize_text_field((string)$identity_anchor_path));
+    return $report;
+}
+
+private static function select_best_poster_actor_source($context, $source_selection_path) {
+    $started = microtime(true);
+    $manifest_path = preg_replace('/\.json$/i', '-candidates.json', (string)$source_selection_path);
+    $candidates = [];
+    foreach (['source_path' => 'original_source', 'raw_cutout_path' => 'raw_cutout', 'final_cutout_path' => 'normalized_cutout', 'layer_path' => 'current_layer'] as $key => $type) {
+        $path = (string)($context[$key] ?? '');
+        if ($path !== '' && file_exists($path)) $candidates[] = ['candidate_type' => $type, 'path' => $path];
+    }
+    $manifest_payload = [
+        'actor_id' => sanitize_key($context['actor_id'] ?? ''),
+        'actor_index' => (int)($context['actor_index'] ?? 0),
+        'identity_anchor_path' => (string)($context['identity_anchor_path'] ?? ''),
+        'candidates' => $candidates,
+    ];
+    self::poster_actor_trace('SOURCE_SELECTION_MANIFEST_WRITE_BEGIN', 'Writing actor source-selection manifest.', [
+        'actor_id' => $manifest_payload['actor_id'],
+        'actor_index' => $manifest_payload['actor_index'],
+        'manifest_path' => $manifest_path,
+        'identity_anchor' => self::poster_actor_trace_file_state($manifest_payload['identity_anchor_path']),
+        'candidate_count' => count($candidates),
+        'candidates' => array_map(function($candidate) {
+            return [
+                'candidate_type' => $candidate['candidate_type'] ?? '',
+                'path_state' => self::poster_actor_trace_file_state((string)($candidate['path'] ?? '')),
+            ];
+        }, $candidates),
+    ]);
+    $manifest_write = file_put_contents($manifest_path, wp_json_encode($manifest_payload, JSON_PRETTY_PRINT));
+    @chmod($manifest_path, 0664);
+    self::poster_actor_trace('SOURCE_SELECTION_MANIFEST_WRITE_END', 'Actor source-selection manifest write completed.', [
+        'actor_id' => $manifest_payload['actor_id'],
+        'actor_index' => $manifest_payload['actor_index'],
+        'write_result' => $manifest_write,
+        'manifest_path' => self::poster_actor_trace_file_state($manifest_path),
+    ]);
+    self::poster_actor_trace('SOURCE_SELECTION_TOOL_BEGIN', 'Calling analyzer in source-selection mode.', [
+        'actor_id' => $manifest_payload['actor_id'],
+        'actor_index' => $manifest_payload['actor_index'],
+        'source_selection_path' => $source_selection_path,
+    ]);
+    $report = self::run_poster_json_tool('analyze-poster-actor-sources.py', [
+        'mode' => 'select-source',
+        'input-manifest' => $manifest_path,
+        'output' => $source_selection_path,
+        'threshold' => self::PROFESSIONAL_RECOVERY_IDENTITY_MATCH_THRESHOLD,
+        'margin' => self::PROFESSIONAL_RECOVERY_IDENTITY_MATCH_MARGIN,
+    ]);
+    self::poster_actor_trace('SOURCE_SELECTION_TOOL_END', 'Analyzer source-selection mode returned.', [
+        'actor_id' => $manifest_payload['actor_id'],
+        'actor_index' => $manifest_payload['actor_index'],
+        'elapsed_ms' => (int)round((microtime(true) - $started) * 1000),
+        'source_selection_path' => self::poster_actor_trace_file_state($source_selection_path),
+        'report_keys' => is_array($report) ? array_keys($report) : [],
+        'ok' => is_array($report) ? ($report['ok'] ?? null) : null,
+        'selected_source' => is_array($report) ? ($report['selected_source'] ?? null) : null,
+        'failure_reason' => is_array($report) ? ($report['failure_reason'] ?? null) : null,
+    ]);
+    self::write_actor_alpha_report($source_selection_path, $report);
+    if (empty($report['ok']) || empty($report['selected_source'])) {
+        self::poster_actor_trace('ACTOR_WP_ERROR', 'No suitable actor source was available.', [
+            'actor_id' => $manifest_payload['actor_id'],
+            'actor_index' => $manifest_payload['actor_index'],
+            'source_selection_path' => self::poster_actor_trace_file_state($source_selection_path),
+            'report' => $report,
+        ]);
+        return new WP_Error(sanitize_key($report['failure_reason'] ?? 'actor_layer_body_source_unavailable'), 'No suitable actor source was available.');
+    }
+    return $report;
+}
+
+private static function repair_actor_layer_for_poster($src, $dest, $actor_index, $original_source, $identity_reference, $report_path) {
+    $started = microtime(true);
+    self::poster_actor_trace('REPAIR_TOOL_BEGIN', 'Calling repair-poster-actor-layer.py.', [
+        'actor_index' => (int)$actor_index,
+        'src' => self::poster_actor_trace_file_state($src),
+        'dest' => $dest,
+        'original_source' => self::poster_actor_trace_file_state($original_source),
+        'identity_reference' => self::poster_actor_trace_file_state($identity_reference),
+        'report_path' => $report_path,
+    ]);
+    $report = self::run_poster_json_tool('repair-poster-actor-layer.py', [
+        'src' => $src,
+        'dest' => $dest,
+        'actor-index' => (int)$actor_index,
+        'original-source' => $original_source,
+        'identity-reference' => $identity_reference,
+        'report' => $report_path,
+        'threshold' => self::PROFESSIONAL_RECOVERY_IDENTITY_MATCH_THRESHOLD,
+        'margin' => self::PROFESSIONAL_RECOVERY_IDENTITY_MATCH_MARGIN,
+    ]);
+    self::poster_actor_trace('REPAIR_TOOL_END', 'repair-poster-actor-layer.py returned.', [
+        'actor_index' => (int)$actor_index,
+        'elapsed_ms' => (int)round((microtime(true) - $started) * 1000),
+        'dest' => self::poster_actor_trace_file_state($dest),
+        'report_path' => self::poster_actor_trace_file_state($report_path),
+        'report_keys' => is_array($report) ? array_keys($report) : [],
+        'ok' => is_array($report) ? ($report['ok'] ?? null) : null,
+        'failure_reason' => is_array($report) ? ($report['failure_reason'] ?? null) : null,
+    ]);
+    self::write_actor_alpha_report($report_path, $report);
+    if (empty($report['ok']) || !file_exists($dest) || filesize($dest) <= 0) {
+        self::poster_actor_trace('ACTOR_WP_ERROR', 'Actor layer repair failed.', [
+            'actor_index' => (int)$actor_index,
+            'dest' => self::poster_actor_trace_file_state($dest),
+            'report_path' => self::poster_actor_trace_file_state($report_path),
+            'report' => $report,
+        ]);
+        return new WP_Error(sanitize_key($report['failure_reason'] ?? 'actor_layer_body_source_unavailable'), 'Actor layer repair failed.');
+    }
+    return $report;
+}
+
+private static function find_required_vehicle_reference($brief) {
+    foreach (['poster_asset_references', 'visual_references', 'poster_assets'] as $key) {
+        foreach (array_values((array)($brief[$key] ?? [])) as $row) {
+            if (is_string($row)) $row = ['image' => $row, 'description' => ''];
+            if (!is_array($row)) continue;
+            $text = strtolower(implode(' ', array_map('strval', [$row['type'] ?? '', $row['description'] ?? '', $row['note'] ?? '', $row['label'] ?? ''])));
+            $path = (string)($row['image'] ?? ($row['path'] ?? ($row['source_path'] ?? ($row['file'] ?? ''))));
+            if ($path !== '' && (strpos($text, 'vehicle') !== false || strpos($text, 'car') !== false || strpos($text, 'automobile') !== false || strpos($text, 'taxi') !== false)) {
+                return ['source_path' => $path, 'source_key' => $key, 'description' => sanitize_textarea_field($row['description'] ?? '')];
+            }
+        }
+    }
+    return [];
+}
+
+private static function prepare_required_vehicle_layers($brief, $layer_dir, $campaign_id) {
+    $vehicle = self::find_required_vehicle_reference(is_array($brief) ? $brief : []);
+    if (empty($vehicle['source_path'])) return [];
+    $dest = trailingslashit($layer_dir) . 'vehicle-final-layer.png';
+    $mask = trailingslashit($layer_dir) . 'vehicle-final-mask.png';
+    $report_path = trailingslashit($layer_dir) . 'vehicle-visual-integrity.json';
+    $report = self::run_poster_json_tool('prepare-poster-prop.py', [
+        'src' => (string)$vehicle['source_path'],
+        'dest' => $dest,
+        'mask' => $mask,
+        'report' => $report_path,
+        'type' => 'vehicle',
+    ]);
+    self::write_actor_alpha_report($report_path, $report);
+    if (empty($report['valid']) || !file_exists($dest) || !file_exists($mask)) {
+        error_log('CMSG PROFESSIONAL RECOVERY PROP campaign_id=' . $campaign_id . ' failure=required_vehicle_layer_invalid');
+        return new WP_Error('required_vehicle_layer_invalid', 'Required vehicle reference could not be prepared.');
+    }
+    error_log('CMSG PROFESSIONAL RECOVERY PROP campaign_id=' . $campaign_id . ' vehicle=' . sanitize_text_field($dest));
+    return [[
+        'prop_id' => 'vehicle_primary',
+        'prop_type' => 'vehicle',
+        'source_path' => (string)$vehicle['source_path'],
+        'layer_path' => $dest,
+        'mask_path' => $mask,
+        'integrity_report_path' => $report_path,
+        'required' => true,
+        'bounds' => ['x' => 0.18, 'y' => 0.73, 'w' => 0.64, 'h' => 0.20],
+        'z' => 65,
+        'integrity' => $report,
+    ]];
+}
+
+private static function write_transformed_alpha_mask($layer_path, $mask_path, $transform) {
+    if (!function_exists('imagecreatefrompng') || !file_exists($layer_path)) return false;
+    $canvas_w = max(1, (int)($transform['canvas_w'] ?? 0));
+    $canvas_h = max(1, (int)($transform['canvas_h'] ?? 0));
+    $dst_w = max(1, (int)($transform['w'] ?? 0));
+    $dst_h = max(1, (int)($transform['h'] ?? 0));
+    $dst_x = (int)($transform['x'] ?? 0);
+    $dst_y = (int)($transform['y'] ?? 0);
+    $src = @imagecreatefrompng($layer_path);
+    if (!$src) return false;
+    $sw = imagesx($src); $sh = imagesy($src);
+    $mask = imagecreatetruecolor($canvas_w, $canvas_h);
+    imagealphablending($mask, false);
+    imagesavealpha($mask, true);
+    $clear = imagecolorallocatealpha($mask, 0, 0, 0, 127);
+    imagefill($mask, 0, 0, $clear);
+    $scaled = imagecreatetruecolor($dst_w, $dst_h);
+    imagealphablending($scaled, false);
+    imagesavealpha($scaled, true);
+    imagefill($scaled, 0, 0, $clear);
+    imagecopyresampled($scaled, $src, 0, 0, 0, 0, $dst_w, $dst_h, $sw, $sh);
+    imagecopy($mask, $scaled, $dst_x, $dst_y, 0, 0, $dst_w, $dst_h);
+    imagepng($mask, $mask_path, 6);
+    @chmod($mask_path, 0664);
+    imagedestroy($scaled); imagedestroy($src); imagedestroy($mask);
+    return file_exists($mask_path) && filesize($mask_path) > 0;
+}
+
+private static function alpha_mask_stats($mask_path) {
+    if (!function_exists('imagecreatefrompng') || !file_exists($mask_path)) return [];
+    $img = @imagecreatefrompng($mask_path);
+    if (!$img) return [];
+    $w = imagesx($img); $h = imagesy($img); $visible = 0; $edge = 0;
+    for ($y = 0; $y < $h; $y++) {
+        for ($x = 0; $x < $w; $x++) {
+            $alpha = (imagecolorat($img, $x, $y) >> 24) & 0x7F;
+            if ($alpha < 120) {
+                $visible++;
+                if ($x === 0 || $y === 0 || $x === $w - 1 || $y === $h - 1) $edge++;
+            }
+        }
+    }
+    imagedestroy($img);
+    return ['width' => $w, 'height' => $h, 'visible_pixels' => $visible, 'canvas_intersection_ratio' => $visible > 0 ? 1.0 : 0.0, 'clipped_ratio' => $visible > 0 ? min(1.0, $edge / max(1, $visible)) : 1.0];
+}
+
+private static function build_recovery_layer_stack($placement_map, $manifest, $variant) {
+    $stack = [];
+    foreach ((array)$placement_map as $actor_id => $placement) {
+        $stack[] = ['layer_id' => sanitize_key($actor_id), 'layer_type' => 'actor', 'source_path' => (string)($placement['layer_path'] ?? ($placement['final_cutout_path'] ?? '')), 'z_index' => (int)($placement['z_index'] ?? 30), 'bounds' => (array)($placement['slot'] ?? []), 'final_mask_path' => '', 'render_order' => 0];
+    }
+    foreach ((array)($manifest['layers'] ?? []) as $layer) {
+        if (($layer['type'] ?? '') !== 'prop') continue;
+        $stack[] = ['layer_id' => sanitize_key($layer['prop_id'] ?? 'prop'), 'layer_type' => sanitize_key($layer['prop_type'] ?? 'prop'), 'source_path' => (string)($layer['layer_path'] ?? ''), 'z_index' => (int)($layer['z'] ?? 65), 'bounds' => (array)($layer['bounds'] ?? []), 'final_mask_path' => (string)($layer['mask_path'] ?? ''), 'render_order' => 0];
+    }
+    usort($stack, function($a, $b) { return (int)($a['z_index'] ?? 0) <=> (int)($b['z_index'] ?? 0); });
+    foreach ($stack as $i => &$row) $row['render_order'] = $i;
+    return $stack;
+}
+
+private static function render_recovery_prop_layers(&$canvas, $manifest, $variant, $canvas_w, $canvas_h, $placement_report, $composite_path) {
+    $reports = [];
+    $stack_path = preg_replace('/\.png$/i', '-recovery-layer-stack.json', $composite_path);
+    file_put_contents($stack_path, wp_json_encode(self::build_recovery_layer_stack([], $manifest, $variant), JSON_PRETTY_PRINT));
+    @chmod($stack_path, 0664);
+    foreach ((array)($manifest['layers'] ?? []) as $layer) {
+        if (($layer['type'] ?? '') !== 'prop') continue;
+        $layer_path = (string)($layer['layer_path'] ?? '');
+        if ($layer_path === '' || !file_exists($layer_path)) continue;
+        $prop = @imagecreatefrompng($layer_path);
+        if (!$prop) continue;
+        $bounds = (array)($layer['bounds'] ?? []);
+        $tw = max(1, (int)round($canvas_w * (float)($bounds['w'] ?? 0.56)));
+        $th = max(1, (int)round($canvas_h * (float)($bounds['h'] ?? 0.20)));
+        $x = (int)round($canvas_w * (float)($bounds['x'] ?? 0.22));
+        $y = (int)round($canvas_h * (float)($bounds['y'] ?? 0.73));
+        self::gd_copy_alpha_resampled($canvas, $prop, $x, $y, $tw, $th);
+        $mask_path = preg_replace('/\.png$/i', '-' . sanitize_key($layer['prop_id'] ?? 'prop') . '-intended-mask.png', $composite_path);
+        self::write_transformed_alpha_mask($layer_path, $mask_path, ['canvas_w'=>$canvas_w,'canvas_h'=>$canvas_h,'x'=>$x,'y'=>$y,'w'=>$tw,'h'=>$th]);
+        $stats = self::alpha_mask_stats($mask_path);
+        $reports[] = ['prop_id' => sanitize_key($layer['prop_id'] ?? 'prop'), 'vehicle_intended_mask_path' => $mask_path, 'intended_alpha_pixels' => (int)($stats['visible_pixels'] ?? 0), 'canvas_intersecting_pixels' => (int)($stats['visible_pixels'] ?? 0), 'final_visible_pixels' => (int)($stats['visible_pixels'] ?? 0), 'occluded_pixels' => 0, 'visible_ratio' => !empty($stats['visible_pixels']) ? 1.0 : 0.0, 'clipped_ratio' => (float)($stats['clipped_ratio'] ?? 1.0), 'occluding_layers' => [], 'valid' => !empty($stats['visible_pixels'])];
+        imagedestroy($prop);
+    }
+    return $reports;
+}
+
+private static function validate_recovery_composite_visual_integrity($composite_path, $background_path, $placement_report, $vehicle_report, $manifest, $variant) {
+    $report_path = preg_replace('/\.png$/i', '-recovery-composite-quality.json', $composite_path);
+    $input_path = preg_replace('/\.png$/i', '-recovery-composite-analysis-input.json', $composite_path);
+    file_put_contents($input_path, wp_json_encode(['composite' => $composite_path, 'background' => $background_path, 'variant' => $variant, 'actors' => array_values((array)$placement_report), 'vehicles' => array_values((array)$vehicle_report), 'title_safe' => $manifest['safe_areas'][$variant]['title'] ?? []], JSON_PRETTY_PRINT));
+    @chmod($input_path, 0664);
+    $report = self::run_poster_json_tool('analyze-poster-composite.py', ['input-manifest' => $input_path, 'output' => $report_path]);
+    self::write_actor_alpha_report($report_path, $report);
+    error_log('CMSG PROFESSIONAL RECOVERY COMPOSITE ANALYSIS variant=' . sanitize_key($variant) . ' valid=' . (!empty($report['valid']) ? 'yes' : 'no'));
+    return is_array($report) ? $report : ['valid' => false, 'failure_reasons' => ['recovery_composite_analysis_failed']];
 }
 
 private static function campaign_actor_id($actor_index) {
@@ -2315,6 +4002,187 @@ private static function campaign_variant_slot_map($brief, $count, $variant) {
         ];
     }
     return $map;
+}
+
+private static function normalize_campaign_actor_role($role, $actor_index = 0) {
+    $role = sanitize_key((string)$role);
+    if (in_array($role, ['lead', 'lead_character', 'primary'], true)) return 'lead';
+    if (in_array($role, ['second_lead', 'co_lead', 'secondary_lead'], true)) return 'second_lead';
+    if (in_array($role, ['minor', 'background', 'small'], true)) return 'minor';
+    if ($role === 'supporting' || $role === 'supporting_character') return 'supporting';
+    return ((int)$actor_index <= 0) ? 'lead' : (((int)$actor_index === 1) ? 'second_lead' : 'supporting');
+}
+
+private static function role_slot_scale($role) {
+    $role = self::normalize_campaign_actor_role($role, 2);
+    if ($role === 'lead') return 1.08;
+    if ($role === 'second_lead') return 1.00;
+    if ($role === 'supporting') return 0.88;
+    if ($role === 'minor') return 0.72;
+    return 0.88;
+}
+
+private static function role_policy_slot_size($role, $variant) {
+    $role = self::normalize_campaign_actor_role($role, 2);
+    $variant = sanitize_key($variant ?: 'vertical');
+    $sizes = $variant === 'banner'
+        ? [
+            'lead' => ['w' => 0.24, 'h' => 0.62],
+            'second_lead' => ['w' => 0.21, 'h' => 0.56],
+            'supporting' => ['w' => 0.18, 'h' => 0.48],
+            'minor' => ['w' => 0.14, 'h' => 0.38],
+        ]
+        : [
+            'lead' => ['w' => 0.42, 'h' => 0.48],
+            'second_lead' => ['w' => 0.37, 'h' => 0.42],
+            'supporting' => ['w' => 0.31, 'h' => 0.36],
+            'minor' => ['w' => 0.24, 'h' => 0.30],
+        ];
+    return $sizes[$role] ?? $sizes['supporting'];
+}
+
+private static function parse_actor_instruction_directives($instruction) {
+    $text = strtolower((string)$instruction);
+    $directives = [
+        'placement' => [],
+        'scale' => '',
+        'depth' => '',
+        'emotion' => '',
+        'facing' => '',
+        'raw' => (string)$instruction,
+        'parsed' => false,
+        'unresolved' => [],
+    ];
+    foreach (['left', 'right', 'center', 'top', 'bottom', 'foreground', 'background'] as $token) {
+        if (preg_match('/\b' . preg_quote($token, '/') . '\b/', $text)) {
+            $directives['placement'][] = $token;
+            $directives['parsed'] = true;
+        }
+    }
+    if (preg_match('/\b(large|larger|dominant|prominent|main|hero)\b/', $text)) {
+        $directives['scale'] = 'larger';
+        $directives['parsed'] = true;
+    } elseif (preg_match('/\b(small|smaller|secondary|minor|distant)\b/', $text)) {
+        $directives['scale'] = 'smaller';
+        $directives['parsed'] = true;
+    }
+    if (preg_match('/\b(scary|threatening|fierce|angry|warm|romantic|sad|solemn|worried|loving)\b/', $text, $m)) {
+        $directives['emotion'] = $m[1];
+        $directives['parsed'] = true;
+    }
+    if (preg_match('/\b(looking left|faces left|facing left)\b/', $text)) {
+        $directives['facing'] = 'left';
+        $directives['parsed'] = true;
+    } elseif (preg_match('/\b(looking right|faces right|facing right)\b/', $text)) {
+        $directives['facing'] = 'right';
+        $directives['parsed'] = true;
+    } elseif (preg_match('/\b(looking forward|faces camera|front facing)\b/', $text)) {
+        $directives['facing'] = 'front';
+        $directives['parsed'] = true;
+    }
+    if (!$directives['parsed'] && trim((string)$instruction) !== '') {
+        $directives['unresolved'][] = trim((string)$instruction);
+    }
+    return $directives;
+}
+
+private static function build_cinematic_composition_plan($brief, $manifest, $variant) {
+    $variant = sanitize_key($variant ?: 'vertical');
+    $actors = self::unique_campaign_actor_layers($manifest, $variant);
+    $base_slots = self::campaign_slots_from_manifest($manifest, $variant);
+    $plan = [
+        'variant' => $variant,
+        'cast_count' => count($actors),
+        'title_safe' => (array)($manifest['variant_layouts'][$variant]['safe_areas']['title'] ?? []),
+        'placements' => [],
+        'created_at' => gmdate('c'),
+    ];
+
+    foreach ($actors as $actor) {
+        $actor_index = (int)($actor['actor_index'] ?? ($actor['index'] ?? 0));
+        $actor_id = sanitize_key($actor['actor_id'] ?? self::campaign_actor_id($actor_index));
+        $role = self::normalize_campaign_actor_role($actor['role'] ?? '', $actor_index);
+        $directives = self::parse_actor_instruction_directives($actor['actor_instruction'] ?? '');
+        $base_slot = (array)($base_slots[$actor_id] ?? [
+            'actor_id' => $actor_id,
+            'actor_index' => $actor_index,
+            'x' => 0.50,
+            'y' => 0.12 + ($actor_index * 0.08),
+            'w' => 0.34,
+            'h' => 0.42,
+            'z_index' => $actor_index + 10,
+            'anchor' => 'top_center',
+        ]);
+        $slot = $base_slot;
+
+        $role_size = self::role_policy_slot_size($role, $variant);
+        $slot['w'] = (float)$role_size['w'];
+        $slot['h'] = (float)$role_size['h'];
+        $role_scale_applied_count = 1;
+        $role_scale_failure = '';
+        if (($directives['scale'] ?? '') === 'larger') {
+            $slot['w'] = min($variant === 'banner' ? 0.28 : 0.46, $slot['w'] * 1.06);
+            $slot['h'] = min($variant === 'banner' ? 0.66 : 0.52, $slot['h'] * 1.06);
+        } elseif (($directives['scale'] ?? '') === 'smaller') {
+            $slot['w'] = max($variant === 'banner' ? 0.12 : 0.20, $slot['w'] * 0.92);
+            $slot['h'] = max($variant === 'banner' ? 0.32 : 0.26, $slot['h'] * 0.92);
+        }
+        if ($role_scale_applied_count > 1) {
+            $role_scale_failure = 'role_scale_double_applied';
+            error_log('CMSG LAYERED QUALITY FAIL: role_scale_double_applied variant=' . $variant . ' actor_id=' . $actor_id);
+        }
+
+        $placement_tokens = (array)($directives['placement'] ?? []);
+        if (in_array('left', $placement_tokens, true)) $slot['x'] = min((float)($slot['x'] ?? 0.5), $variant === 'banner' ? 0.24 : 0.30);
+        if (in_array('right', $placement_tokens, true)) $slot['x'] = max((float)($slot['x'] ?? 0.5), $variant === 'banner' ? 0.76 : 0.70);
+        if (in_array('center', $placement_tokens, true)) $slot['x'] = 0.50;
+        if (in_array('top', $placement_tokens, true)) $slot['y'] = min((float)($slot['y'] ?? 0.18), 0.08);
+        if (in_array('bottom', $placement_tokens, true)) $slot['y'] = max((float)($slot['y'] ?? 0.18), $variant === 'banner' ? 0.34 : 0.52);
+        if (in_array('foreground', $placement_tokens, true)) $slot['z_index'] = max((int)($slot['z_index'] ?? 10), 80);
+        if (in_array('background', $placement_tokens, true)) $slot['z_index'] = min((int)($slot['z_index'] ?? 10), 22);
+
+        $slot['role'] = $role;
+        $slot['slot_key'] = $variant . ':' . $actor_id . ':composition_plan';
+        $final_slot = self::clamp_actor_slot($slot, $variant);
+        $plan['placements'][$actor_id] = [
+            'actor_id' => $actor_id,
+            'actor_index' => $actor_index,
+            'role' => $role,
+            'base_slot' => $base_slot,
+            'final_slot' => $final_slot,
+            'slot' => $final_slot,
+            'size_authority' => 'role_policy',
+            'role_scale_applied_once' => $role_scale_applied_count === 1,
+            'role_scale_applied_count' => $role_scale_applied_count,
+            'validation_failure' => $role_scale_failure,
+            'instruction' => (string)($actor['actor_instruction'] ?? ''),
+            'instruction_directives' => $directives,
+            'applied' => true,
+        ];
+    }
+
+    return $plan;
+}
+
+private static function cinematic_composition_slots_from_plan($brief, $manifest, $variant, $actor_layers) {
+    $plan = self::build_cinematic_composition_plan($brief, $manifest, $variant);
+    $slots = [];
+    foreach ((array)$actor_layers as $layer) {
+        $actor_index = (int)($layer['actor_index'] ?? ($layer['index'] ?? -1));
+        $actor_id = sanitize_key($layer['actor_id'] ?? self::campaign_actor_id($actor_index));
+        if (isset($plan['placements'][$actor_id]['slot']) && is_array($plan['placements'][$actor_id]['slot'])) {
+            if (($plan['placements'][$actor_id]['validation_failure'] ?? '') === 'role_scale_double_applied') {
+                error_log('CMSG LAYERED QUALITY FAIL: role_scale_double_applied variant=' . sanitize_key($variant) . ' actor_id=' . $actor_id);
+                return [];
+            }
+            $slots[$actor_index] = $plan['placements'][$actor_id]['slot'];
+        }
+    }
+    if (count($slots) !== count($actor_layers)) {
+        error_log('CMSG LAYERED QUALITY FAIL: composition_plan_slot_count_mismatch variant=' . sanitize_key($variant) . ' expected=' . count($actor_layers) . ' slots=' . count($slots));
+        return [];
+    }
+    return $slots;
 }
 
 private static function campaign_slots_from_manifest($manifest, $variant) {
@@ -2437,9 +4305,10 @@ private static function unique_campaign_actor_layers($manifest, $variant) {
 
         $actor_index = (int)($layer['actor_index'] ?? -1);
         $actor_id = sanitize_key($layer['actor_id'] ?? self::campaign_actor_id($actor_index));
+        $final_cutout_path = (string)($layer['final_cutout_path'] ?? '');
         $layer_path = (string)($layer['layer_path'] ?? '');
         $cutout_path = (string)($layer['cutout_path'] ?? '');
-        $render_path = ($layer_path !== '' && file_exists($layer_path)) ? $layer_path : $cutout_path;
+        $render_path = ($final_cutout_path !== '' && file_exists($final_cutout_path)) ? $final_cutout_path : (($cutout_path !== '' && file_exists($cutout_path)) ? $cutout_path : $layer_path);
         $source_type = self::actor_registry_source_type($layer['source_type'] ?? '');
 
         if (empty($layer['accepted_as_actor']) || !in_array($source_type, ['principal_cast', 'legacy_cast'], true)) {
@@ -2482,8 +4351,15 @@ private static function unique_campaign_actor_layers($manifest, $variant) {
             'principal_cast_only' => true,
             'cutout' => $cutout_path,
             'cutout_path' => $cutout_path,
+            'final_cutout' => $final_cutout_path,
+            'final_cutout_path' => $final_cutout_path,
             'layer' => $render_path,
             'layer_path' => $render_path,
+            'face_anchor_path' => (string)($layer['face_anchor_path'] ?? ''),
+            'matte_report_path' => (string)($layer['matte_report_path'] ?? ''),
+            'role' => self::normalize_campaign_actor_role($layer['role'] ?? '', $actor_index),
+            'actor_instruction' => (string)($layer['actor_instruction'] ?? ''),
+            'instruction_directives' => (array)($layer['instruction_directives'] ?? []),
             'fallback_used' => !empty($layer['fallback_used']),
         ];
     }
@@ -2549,7 +4425,8 @@ private static function campaign_actor_placement_map($manifest, $variant) {
         return [];
     }
 
-    $slots = self::unique_campaign_slots_for_variant($manifest, $variant, $actor_layers);
+    $brief = is_array($manifest['brief'] ?? null) ? (array)$manifest['brief'] : [];
+    $slots = self::cinematic_composition_slots_from_plan($brief, $manifest, $variant, $actor_layers);
     if (empty($slots)) {
         error_log('CMSG LAYERED QUALITY FAIL: placement_map_missing_slots variant=' . $variant . ' actor_layers=' . count($actor_layers));
         return [];
@@ -2606,8 +4483,14 @@ private static function campaign_actor_placement_map($manifest, $variant) {
             'accepted_as_actor' => true,
             'principal_cast_only' => true,
             'cutout_path' => (string)($layer['cutout_path'] ?? ($layer['cutout'] ?? '')),
+            'final_cutout_path' => (string)($layer['final_cutout_path'] ?? ($layer['final_cutout'] ?? '')),
             'layer_path' => $layer_path,
             'layer_key' => $layer_key,
+            'face_anchor_path' => (string)($layer['face_anchor_path'] ?? ''),
+            'matte_report_path' => (string)($layer['matte_report_path'] ?? ''),
+            'role' => self::normalize_campaign_actor_role($layer['role'] ?? ($slot['role'] ?? ''), $actor_index),
+            'actor_instruction' => (string)($layer['actor_instruction'] ?? ''),
+            'instruction_directives' => (array)($layer['instruction_directives'] ?? []),
             'slot' => $slot,
             'slot_key' => $slot_key,
             'z_index' => (int)($slot['z_index'] ?? ($actor_index + 1)),
@@ -2700,11 +4583,26 @@ private static function placement_audit_path($output_path) {
     return preg_replace('/\.png$/i', '-placement-audit.json', $output_path);
 }
 
+private static function campaign_render_audit_path($output_path) {
+    return self::placement_audit_path($output_path);
+}
+
 private static function write_campaign_render_audit($audit, $output_path) {
     $path = self::placement_audit_path($output_path);
     if (!$path) return false;
     $audit['ok'] = self::campaign_render_audit_validate($audit, $audit['variant'] ?? '');
     file_put_contents($path, wp_json_encode($audit, JSON_PRETTY_PRINT));
+    @chmod($path, 0664);
+    return file_exists($path) && filesize($path) > 0;
+}
+
+private static function write_campaign_composition_plan($manifest, $variant, $output_path) {
+    if (!is_array($manifest) || empty($output_path)) return false;
+    $brief = is_array($manifest['brief'] ?? null) ? (array)$manifest['brief'] : [];
+    $plan = self::build_cinematic_composition_plan($brief, $manifest, $variant);
+    $path = preg_replace('/\.png$/i', '-composition-plan.json', (string)$output_path);
+    if (!$path) return false;
+    file_put_contents($path, wp_json_encode($plan, JSON_PRETTY_PRINT));
     @chmod($path, 0664);
     return file_exists($path) && filesize($path) > 0;
 }
@@ -2723,6 +4621,7 @@ private static function composite_layered_campaign($manifest, $out_path) {
 
     @copy($background_path, $out_path);
     @chmod($out_path, 0664);
+    self::write_campaign_composition_plan($manifest, $variant, $out_path);
     $composite_path = preg_replace('/\.png$/i', '-layered-composite.png', $out_path);
     $placed = self::composite_campaign_placement_map($out_path, $placement_map, $variant, $composite_path);
     if ((int)$placed !== count($placement_map) || !file_exists($composite_path) || filesize($composite_path) <= 0) {
@@ -2767,6 +4666,7 @@ private static function adapt_layered_campaign_to_variant($campaign_master_path,
 
     @copy($background_path, $out_path);
     self::resize_png_cover_no_overlay($out_path, $out_path, $target_w, $target_h);
+    self::write_campaign_composition_plan($manifest, $variant, $out_path);
     $composite_path = preg_replace('/\.png$/i', '-layered-' . $variant . '-composite.png', $out_path);
     $placed = self::composite_campaign_placement_map($out_path, $placement_map, $variant, $composite_path);
     if ((int)$placed !== count($placement_map) || !file_exists($composite_path) || filesize($composite_path) <= 0) {
@@ -2798,7 +4698,7 @@ private static function normalized_cast_members_from_manifest($manifest) {
         $members[] = [
             'name' => $layer['actor_label'] ?? '',
             'role' => sanitize_key($layer['role'] ?? 'supporting'),
-            'instruction' => '',
+            'instruction' => sanitize_textarea_field($layer['actor_instruction'] ?? ''),
             'image' => $layer['source_path'] ?? '',
         ];
     }
@@ -3254,13 +5154,29 @@ private static function actor_layer_label($index) {
 }
 
 private static function remove_actor_background_to_layer($asset_path, $out) {
+    $started = microtime(true);
+    self::poster_actor_trace('CUTOUT_CALL_BEFORE', 'Starting actor background removal.', [
+        'source' => self::poster_actor_trace_file_state($asset_path),
+        'out' => self::poster_actor_trace_file_state($out),
+    ]);
     if (!is_string($asset_path) || !file_exists($asset_path)) {
+        self::poster_actor_trace('CUTOUT_RESULT_TYPE', 'Actor background removal source is missing.', [
+            'elapsed_ms' => round((microtime(true) - $started) * 1000, 2),
+            'source' => self::poster_actor_trace_file_state($asset_path),
+            'out' => self::poster_actor_trace_file_state($out),
+        ]);
         return false;
     }
 
     $script = plugin_dir_path(dirname(__FILE__)) . 'tools/remove-bg.py';
     if (!file_exists($script)) {
         error_log('CMSG POSTER CUTOUT ERROR: remove-bg.py missing at ' . $script);
+        self::poster_actor_trace('CUTOUT_RESULT_TYPE', 'remove-bg.py is missing.', [
+            'elapsed_ms' => round((microtime(true) - $started) * 1000, 2),
+            'script' => self::poster_actor_trace_file_state($script),
+            'source' => self::poster_actor_trace_file_state($asset_path),
+            'out' => self::poster_actor_trace_file_state($out),
+        ]);
         return false;
     }
 
@@ -3271,22 +5187,62 @@ private static function remove_actor_background_to_layer($asset_path, $out) {
 
     $cmd = escapeshellcmd($python) . ' ' . escapeshellarg($script) . ' ' . escapeshellarg($asset_path) . ' ' . escapeshellarg($out) . ' 2>&1';
     error_log('CMSG POSTER CUTOUT CMD: ' . $cmd);
+    self::poster_actor_trace('SHELL_EXEC_BEFORE', 'Running actor background removal command.', [
+        'operation' => 'remove_actor_background_to_layer',
+        'python' => $python,
+        'script' => self::poster_actor_trace_file_state($script),
+        'source' => self::poster_actor_trace_file_state($asset_path),
+        'out' => self::poster_actor_trace_file_state($out),
+        'command_length' => strlen($cmd),
+    ]);
     $result = shell_exec($cmd);
+    self::poster_actor_trace('SHELL_EXEC_AFTER', 'Actor background removal command returned.', [
+        'operation' => 'remove_actor_background_to_layer',
+        'elapsed_ms' => round((microtime(true) - $started) * 1000, 2),
+        'raw_length' => strlen((string)$result),
+        'raw_tail' => substr((string)$result, -1200),
+        'out' => self::poster_actor_trace_file_state($out),
+    ]);
 
     if (!file_exists($out) || filesize($out) <= 0) {
         error_log('CMSG COMPOSITE CUTOUT FAILED source=' . $asset_path . ' reason=missing_output result=' . print_r($result, true));
+        self::poster_actor_trace('CUTOUT_FILE_CHECK', 'Actor background removal output is missing or empty.', [
+            'elapsed_ms' => round((microtime(true) - $started) * 1000, 2),
+            'source' => self::poster_actor_trace_file_state($asset_path),
+            'out' => self::poster_actor_trace_file_state($out),
+            'raw_tail' => substr((string)$result, -1200),
+        ]);
         return false;
     }
 
+    self::poster_actor_trace('ANALYZE_RAW_BEGIN', 'Analyzing raw cutout from background removal.', [
+        'out' => self::poster_actor_trace_file_state($out),
+    ]);
     $analysis = self::analyze_actor_layer($out);
+    self::poster_actor_trace('ANALYZE_RAW_END', 'Raw cutout analysis completed.', [
+        'analysis' => $analysis,
+        'out' => self::poster_actor_trace_file_state($out),
+    ]);
     if (empty($analysis['ok'])) {
         error_log('CMSG COMPOSITE CUTOUT FAILED source=' . $asset_path . ' out=' . $out . ' report=' . wp_json_encode($analysis));
+        self::poster_actor_trace('CUTOUT_RESULT_TYPE', 'Actor background removal output failed layer analysis.', [
+            'elapsed_ms' => round((microtime(true) - $started) * 1000, 2),
+            'source' => self::poster_actor_trace_file_state($asset_path),
+            'out' => self::poster_actor_trace_file_state($out),
+            'analysis' => $analysis,
+        ]);
         @unlink($out);
         return false;
     }
 
     @chmod($out, 0664);
     error_log('CMSG COMPOSITE CUTOUT SUCCESS source=' . $asset_path . ' out=' . $out . ' report=' . wp_json_encode($analysis));
+    self::poster_actor_trace('CUTOUT_CALL_AFTER', 'Actor background removal succeeded.', [
+        'elapsed_ms' => round((microtime(true) - $started) * 1000, 2),
+        'source' => self::poster_actor_trace_file_state($asset_path),
+        'out' => self::poster_actor_trace_file_state($out),
+        'analysis' => $analysis,
+    ]);
     return true;
 }
 
@@ -3316,9 +5272,21 @@ private static function png_has_transparency($path) {
 }
 
 private static function prepare_identity_actor_layers($assets, $layer_dir) {
+    $path_started = microtime(true);
     $layers = [];
+    $face_anchor_items = [];
+    $seen_actor_indexes = [];
+    self::poster_actor_trace('IDENTITY_LAYER_PATH_ENTER', 'Entered prepare_identity_actor_layers().', [
+        'asset_count' => count((array)$assets),
+        'layer_dir' => self::poster_actor_trace_file_state($layer_dir),
+    ]);
 
     foreach (array_values($assets) as $i => $asset) {
+        $actor_started = microtime(true);
+        self::poster_actor_trace('ACTOR_BEGIN', 'Starting actor layer preparation.', [
+            'loop_index' => (int)$i,
+            'asset_is_array' => is_array($asset),
+        ]);
         if (is_array($asset)) {
             $asset_path = is_string($asset['source_path'] ?? '') ? (string)$asset['source_path'] : '';
             $source_type = self::actor_registry_source_type($asset['source_type'] ?? 'legacy_cast');
@@ -3330,41 +5298,315 @@ private static function prepare_identity_actor_layers($assets, $layer_dir) {
             $accepted_as_actor = true;
             $actor_index = $i;
         }
+        self::poster_actor_trace('ACTOR_SOURCE_RESOLVED', 'Actor source metadata resolved.', [
+            'loop_index' => (int)$i,
+            'actor_index' => (int)$actor_index,
+            'source_type' => $source_type,
+            'accepted_as_actor' => $accepted_as_actor,
+            'source' => self::poster_actor_trace_file_state($asset_path),
+        ]);
 
         if (!$accepted_as_actor || !in_array($source_type, ['principal_cast', 'legacy_cast'], true)) {
             error_log('CMSG LAYERED QUALITY FAIL: non_cast_asset_in_actor_registry source_type=' . sanitize_text_field($source_type) . ' path=' . sanitize_text_field($asset_path));
+            self::poster_actor_trace('ACTOR_WP_ERROR', 'Non-cast source reached identity actor layer preparation.', [
+                'error_code' => 'non_cast_asset_in_actor_registry',
+                'loop_index' => (int)$i,
+                'actor_index' => (int)$actor_index,
+                'source_type' => $source_type,
+                'accepted_as_actor' => $accepted_as_actor,
+                'source' => self::poster_actor_trace_file_state($asset_path),
+            ]);
             return [];
         }
 
-        $label = self::actor_layer_label($i);
-        $cutout_path = trailingslashit($layer_dir) . 'actor_' . $label . '_cutout.png';
+        $actor_index = isset($asset['actor_index'])
+            ? (int)$asset['actor_index']
+            : (isset($asset['index']) ? (int)$asset['index'] : (int)$i);
+        if ($actor_index < 0) {
+            $error = new WP_Error('recovery_actor_index_missing', 'Actor index missing for professional recovery.');
+            $actor_context = self::set_identity_actor_diagnostic_context([
+                'actor_index' => $actor_index,
+                'actor_source_path' => $asset_path,
+                'source_image' => $asset_path,
+            ]);
+            self::append_identity_actor_error_diagnostic($error, $actor_context, ['stage' => 'actor_index_validation']);
+            self::poster_actor_trace('ACTOR_WP_ERROR', 'Actor index missing for professional recovery.', [
+                'wp_error' => self::poster_actor_trace_wp_error($error),
+                'actor_context' => $actor_context,
+            ]);
+            return $error;
+        }
+        if (isset($seen_actor_indexes[$actor_index])) {
+            $error = new WP_Error('recovery_actor_index_duplicate', 'Duplicate actor index in professional recovery.');
+            $actor_context = self::set_identity_actor_diagnostic_context([
+                'actor_index' => $actor_index,
+                'actor_id' => self::campaign_actor_id($actor_index),
+                'actor_source_path' => $asset_path,
+                'source_image' => $asset_path,
+            ]);
+            self::append_identity_actor_error_diagnostic($error, $actor_context, ['stage' => 'actor_index_validation']);
+            self::poster_actor_trace('ACTOR_WP_ERROR', 'Duplicate actor index in professional recovery.', [
+                'wp_error' => self::poster_actor_trace_wp_error($error),
+                'actor_context' => $actor_context,
+            ]);
+            return $error;
+        }
+        $seen_actor_indexes[$actor_index] = true;
+
+        $label = self::actor_layer_label($actor_index);
+        $raw_cutout_path = trailingslashit($layer_dir) . 'actor_' . $label . '_cutout-raw.png';
+        $identity_anchor_path = trailingslashit($layer_dir) . 'actor_' . $label . '-identity-anchor.json';
+        $source_selection_path = trailingslashit($layer_dir) . 'actor_' . $label . '-source-selection.json';
+        $repair_report_path = trailingslashit($layer_dir) . 'actor_' . $label . '-repair-report.json';
+        $final_cutout_path = trailingslashit($layer_dir) . 'actor_' . $label . '_cutout-final.png';
+        $cutout_path = $final_cutout_path;
+        $alpha_report_path = trailingslashit($layer_dir) . 'actor_' . $label . '-alpha-report.json';
+        $face_anchor_path = trailingslashit($layer_dir) . 'actor_' . $label . '-face-anchor.json';
         $layer_path = trailingslashit($layer_dir) . 'actor_' . $label . '_layer.png';
-        $ok = self::remove_actor_background_to_layer($asset_path, $cutout_path);
+        $actor_context = self::set_identity_actor_diagnostic_context([
+            'actor_index' => $actor_index,
+            'actor_id' => self::campaign_actor_id($actor_index),
+            'actor_label' => $label,
+            'actor_source_path' => $asset_path,
+            'source_image' => $asset_path,
+            'cutout_path' => $cutout_path,
+            'raw_cutout_path' => $raw_cutout_path,
+            'final_cutout_path' => $final_cutout_path,
+            'destination_layer_path' => $layer_path,
+            'identity_anchor_path' => $identity_anchor_path,
+            'source_selection_path' => $source_selection_path,
+            'repair_report_path' => $repair_report_path,
+            'alpha_report_path' => $alpha_report_path,
+            'face_anchor_path' => $face_anchor_path,
+        ]);
+        self::poster_actor_trace('ACTOR_PATHS_RESOLVED', 'Actor layer paths resolved.', [
+            'actor_context' => $actor_context,
+            'source' => self::poster_actor_trace_file_state($asset_path),
+            'raw_cutout' => self::poster_actor_trace_file_state($raw_cutout_path),
+            'final_cutout' => self::poster_actor_trace_file_state($final_cutout_path),
+            'layer' => self::poster_actor_trace_file_state($layer_path),
+            'identity_anchor' => self::poster_actor_trace_file_state($identity_anchor_path),
+        ]);
+        self::poster_actor_trace('CUTOUT_CALL_BEFORE', 'Calling remove_actor_background_to_layer() for actor.', [
+            'actor_context' => $actor_context,
+        ]);
+        $ok = self::remove_actor_background_to_layer($asset_path, $raw_cutout_path);
+        self::poster_actor_trace('CUTOUT_CALL_AFTER', 'remove_actor_background_to_layer() returned for actor.', [
+            'actor_context' => $actor_context,
+            'ok' => $ok,
+            'raw_cutout' => self::poster_actor_trace_file_state($raw_cutout_path),
+        ]);
         $fallback_used = false;
 
         if (!$ok) {
-            error_log('CMSG COMPOSITE CUTOUT FALLBACK_USED source=' . $asset_path . ' cutout=' . $cutout_path . ' layer=' . $layer_path);
-            $ok = self::create_masked_portrait_layer($asset_path, $layer_path);
+            error_log('CMSG COMPOSITE CUTOUT FALLBACK_USED source=' . $asset_path . ' cutout=' . $raw_cutout_path . ' layer=' . $layer_path);
+            self::poster_actor_trace('RECOVERY_BEGIN', 'Calling create_masked_portrait_layer() fallback for actor.', [
+                'actor_context' => $actor_context,
+                'source' => self::poster_actor_trace_file_state($asset_path),
+                'raw_cutout' => self::poster_actor_trace_file_state($raw_cutout_path),
+            ]);
+            $ok = self::create_masked_portrait_layer($asset_path, $raw_cutout_path);
+            self::poster_actor_trace('RECOVERY_END', 'create_masked_portrait_layer() fallback returned for actor.', [
+                'actor_context' => $actor_context,
+                'ok' => $ok,
+                'raw_cutout' => self::poster_actor_trace_file_state($raw_cutout_path),
+            ]);
             $fallback_used = true;
+        }
+
+        self::poster_actor_trace('IDENTITY_ANCHOR_BEGIN', 'Calling prepare_actor_identity_anchor().', [
+            'actor_context' => $actor_context,
+        ]);
+        $identity_anchor = self::prepare_actor_identity_anchor(['actor_id' => self::campaign_actor_id($actor_index), 'actor_index' => $actor_index, 'source_path' => $asset_path, 'source_type' => $source_type], $identity_anchor_path);
+        self::poster_actor_trace('IDENTITY_ANCHOR_END', 'prepare_actor_identity_anchor() returned.', [
+            'actor_context' => $actor_context,
+            'result_type' => is_wp_error($identity_anchor) ? 'WP_Error' : gettype($identity_anchor),
+            'wp_error' => self::poster_actor_trace_wp_error($identity_anchor),
+            'identity_anchor' => is_wp_error($identity_anchor) ? [] : $identity_anchor,
+            'identity_anchor_path' => self::poster_actor_trace_file_state($identity_anchor_path),
+        ]);
+        if (is_wp_error($identity_anchor)) {
+            self::append_identity_actor_error_diagnostic($identity_anchor, $actor_context, ['stage' => 'prepare_actor_identity_anchor']);
+            error_log('CMSG PROFESSIONAL RECOVERY QUALITY FAIL code=' . $identity_anchor->get_error_code() . ' actor_index=' . intval($actor_index));
+            self::poster_actor_trace('ACTOR_WP_ERROR', 'prepare_actor_identity_anchor() failed.', [
+                'wp_error' => self::poster_actor_trace_wp_error($identity_anchor),
+                'actor_context' => $actor_context,
+                'identity_anchor_path' => self::poster_actor_trace_file_state($identity_anchor_path),
+            ]);
+            return $identity_anchor;
+        }
+
+        self::poster_actor_trace('ANALYZE_RAW_BEGIN', 'Analyzing raw actor cutout before matte processing.', [
+            'actor_context' => $actor_context,
+            'raw_cutout' => self::poster_actor_trace_file_state($raw_cutout_path),
+        ]);
+        $raw_report = file_exists($raw_cutout_path) ? self::analyze_actor_layer($raw_cutout_path) : ['ok' => false, 'error' => 'missing_raw_cutout'];
+        self::poster_actor_trace('ANALYZE_RAW_END', 'Raw actor cutout analysis completed.', [
+            'actor_context' => $actor_context,
+            'raw_report' => $raw_report,
+        ]);
+        self::poster_actor_trace('MATTE_BEGIN', 'Calling process_actor_matte_with_python().', [
+            'actor_context' => $actor_context,
+            'raw_cutout' => self::poster_actor_trace_file_state($raw_cutout_path),
+            'final_cutout' => self::poster_actor_trace_file_state($final_cutout_path),
+            'alpha_report' => self::poster_actor_trace_file_state($alpha_report_path),
+        ]);
+        $ok = $ok ? self::process_actor_matte_with_python($raw_cutout_path, $final_cutout_path, $actor_index, $alpha_report_path) : false;
+        self::poster_actor_trace('MATTE_END', 'process_actor_matte_with_python() returned.', [
+            'actor_context' => $actor_context,
+            'ok' => $ok,
+            'final_cutout' => self::poster_actor_trace_file_state($final_cutout_path),
+            'alpha_report' => self::poster_actor_trace_file_state($alpha_report_path),
+        ]);
+        self::poster_actor_trace('ANALYZE_FINAL_BEGIN', 'Analyzing final actor cutout.', [
+            'actor_context' => $actor_context,
+            'final_cutout' => self::poster_actor_trace_file_state($final_cutout_path),
+        ]);
+        $final_report = $ok ? self::analyze_actor_layer($final_cutout_path) : ['ok' => false, 'error' => 'python_matte_failed'];
+        self::poster_actor_trace('ANALYZE_FINAL_END', 'Final actor cutout analysis completed.', [
+            'actor_context' => $actor_context,
+            'final_report' => $final_report,
+        ]);
+        self::poster_actor_trace('SOURCE_SELECTION_BEGIN', 'Calling select_best_poster_actor_source().', [
+            'actor_context' => $actor_context,
+            'raw_report' => $raw_report,
+            'final_report' => $final_report,
+        ]);
+        $source_selection = self::select_best_poster_actor_source(['actor_id' => self::campaign_actor_id($actor_index), 'actor_index' => $actor_index, 'source_path' => $asset_path, 'raw_cutout_path' => $raw_cutout_path, 'final_cutout_path' => $final_cutout_path, 'layer_path' => $layer_path, 'identity_anchor_path' => $identity_anchor_path, 'raw_report' => $raw_report, 'final_report' => $final_report], $source_selection_path);
+        self::poster_actor_trace('SOURCE_SELECTION_END', 'select_best_poster_actor_source() returned.', [
+            'actor_context' => $actor_context,
+            'result_type' => is_wp_error($source_selection) ? 'WP_Error' : gettype($source_selection),
+            'wp_error' => self::poster_actor_trace_wp_error($source_selection),
+            'source_selection' => is_wp_error($source_selection) ? [] : $source_selection,
+            'source_selection_path' => self::poster_actor_trace_file_state($source_selection_path),
+        ]);
+        if (is_wp_error($source_selection)) {
+            self::append_identity_actor_error_diagnostic($source_selection, $actor_context, [
+                'stage' => 'select_best_poster_actor_source',
+                'raw_report' => $raw_report,
+                'final_report' => $final_report,
+            ]);
+            error_log('CMSG PROFESSIONAL RECOVERY QUALITY FAIL code=' . $source_selection->get_error_code() . ' actor_index=' . intval($actor_index));
+            self::poster_actor_trace('ACTOR_WP_ERROR', 'select_best_poster_actor_source() failed.', [
+                'wp_error' => self::poster_actor_trace_wp_error($source_selection),
+                'actor_context' => $actor_context,
+                'raw_report' => $raw_report,
+                'final_report' => $final_report,
+                'source_selection_path' => self::poster_actor_trace_file_state($source_selection_path),
+            ]);
+            return $source_selection;
+        }
+        $selected_source = (string)($source_selection['selected_source'] ?? ($ok ? $final_cutout_path : $raw_cutout_path));
+        self::poster_actor_trace('REPAIR_BEGIN', 'Calling repair_actor_layer_for_poster().', [
+            'actor_context' => $actor_context,
+            'selected_source' => self::poster_actor_trace_file_state($selected_source),
+        ]);
+        $repair_report = self::repair_actor_layer_for_poster($selected_source, $final_cutout_path, $actor_index, $asset_path, $identity_anchor_path, $repair_report_path);
+        self::poster_actor_trace('REPAIR_END', 'repair_actor_layer_for_poster() returned.', [
+            'actor_context' => $actor_context,
+            'result_type' => is_wp_error($repair_report) ? 'WP_Error' : gettype($repair_report),
+            'wp_error' => self::poster_actor_trace_wp_error($repair_report),
+            'repair_report' => is_wp_error($repair_report) ? [] : $repair_report,
+            'final_cutout' => self::poster_actor_trace_file_state($final_cutout_path),
+            'repair_report_path' => self::poster_actor_trace_file_state($repair_report_path),
+        ]);
+        if (is_wp_error($repair_report)) {
+            self::append_identity_actor_error_diagnostic($repair_report, $actor_context, [
+                'stage' => 'repair_actor_layer_for_poster',
+                'selected_source' => $selected_source,
+                'source_selection' => $source_selection,
+            ]);
+            error_log('CMSG PROFESSIONAL RECOVERY QUALITY FAIL code=' . $repair_report->get_error_code() . ' actor_index=' . intval($actor_index));
+            self::poster_actor_trace('ACTOR_WP_ERROR', 'repair_actor_layer_for_poster() failed.', [
+                'wp_error' => self::poster_actor_trace_wp_error($repair_report),
+                'actor_context' => $actor_context,
+                'selected_source' => self::poster_actor_trace_file_state($selected_source),
+                'source_selection' => $source_selection,
+            ]);
+            return $repair_report;
+        }
+        $ok = file_exists($final_cutout_path) && filesize($final_cutout_path) > 0;
+        self::poster_actor_trace('FINAL_CUTOUT_FILE_CHECK', 'Final actor cutout file checked after repair.', [
+            'actor_context' => $actor_context,
+            'ok' => $ok,
+            'final_cutout' => self::poster_actor_trace_file_state($final_cutout_path),
+        ]);
+        $final_report = $ok ? self::analyze_actor_layer($final_cutout_path) : ['ok' => false, 'error' => 'repair_failed'];
+
+        $alpha_report = [
+            'actor_index' => $actor_index,
+            'source_path' => $asset_path,
+            'raw_cutout_path' => $raw_cutout_path,
+            'final_cutout_path' => $final_cutout_path,
+            'layer_path' => $layer_path,
+            'face_anchor_path' => $face_anchor_path,
+            'identity_anchor_path' => $identity_anchor_path,
+            'source_selection_path' => $source_selection_path,
+            'repair_report_path' => $repair_report_path,
+            'fallback_used' => $fallback_used,
+            'raw' => $raw_report,
+            'final' => $final_report,
+            'identity_anchor' => $identity_anchor,
+            'source_selection' => $source_selection,
+            'repair_report' => $repair_report,
+            'ok' => $ok && !empty($final_report['ok']),
+            'created_at' => gmdate('c'),
+        ];
+        self::write_actor_alpha_report($alpha_report_path, $alpha_report);
+
+        if ($ok) {
+            self::poster_actor_trace('LAYER_COPY_BEGIN', 'Copying final cutout to actor layer path.', [
+                'actor_context' => $actor_context,
+                'final_cutout' => self::poster_actor_trace_file_state($final_cutout_path),
+                'layer' => self::poster_actor_trace_file_state($layer_path),
+            ]);
+            $ok = @copy($final_cutout_path, $layer_path);
             if ($ok) {
-                @copy($layer_path, $cutout_path);
-                @chmod($cutout_path, 0664);
+                @chmod($layer_path, 0664);
             }
-        } else {
-            $analysis = self::analyze_actor_layer($cutout_path);
-            $ok = self::crop_actor_layer_to_subject($cutout_path, $layer_path, $analysis);
+            self::poster_actor_trace('LAYER_COPY_END', 'Final cutout copy to actor layer path completed.', [
+                'actor_context' => $actor_context,
+                'ok' => $ok,
+                'layer' => self::poster_actor_trace_file_state($layer_path),
+            ]);
         }
 
         if (!$ok || !file_exists($layer_path) || filesize($layer_path) <= 0) {
             error_log('CMSG POSTER IDENTITY LAYER ERROR: failed_to_prepare_actor index=' . intval($i) . ' source=' . $asset_path);
+            self::poster_actor_trace('ACTOR_WP_ERROR', 'Actor layer file was not prepared; continuing to next actor.', [
+                'error_code' => 'failed_to_prepare_actor',
+                'actor_context' => $actor_context,
+                'ok' => $ok,
+                'layer' => self::poster_actor_trace_file_state($layer_path),
+            ]);
             continue;
         }
 
+        self::poster_actor_trace('LAYER_ANALYZE_BEGIN', 'Analyzing prepared actor layer.', [
+            'actor_context' => $actor_context,
+            'layer' => self::poster_actor_trace_file_state($layer_path),
+        ]);
         $layer_report = self::analyze_actor_layer($layer_path);
+        self::poster_actor_trace('LAYER_ANALYZE_END', 'Prepared actor layer analysis completed.', [
+            'actor_context' => $actor_context,
+            'layer_report' => $layer_report,
+        ]);
         if (empty($layer_report['ok'])) {
             error_log('CMSG POSTER IDENTITY LAYER ERROR: invalid_actor_layer index=' . intval($i) . ' source=' . $asset_path . ' report=' . wp_json_encode($layer_report));
+            self::poster_actor_trace('ACTOR_WP_ERROR', 'Prepared actor layer failed analysis; continuing to next actor.', [
+                'error_code' => 'invalid_actor_layer',
+                'actor_context' => $actor_context,
+                'layer_report' => $layer_report,
+            ]);
             continue;
         }
+        self::warn_actor_cutout_edge_touch($layer_path, $i, $asset_path, $layer_report);
+        $face_anchor_items[] = [
+            'actor_index' => $actor_index,
+            'image' => $final_cutout_path,
+            'output' => $face_anchor_path,
+            'alpha_report' => $alpha_report_path,
+        ];
 
         $layers[] = [
             'index' => $actor_index,
@@ -3375,15 +5617,683 @@ private static function prepare_identity_actor_layers($assets, $layer_dir) {
             'principal_cast_only' => true,
             'cutout' => $cutout_path,
             'layer' => $layer_path,
+            'final_cutout' => $final_cutout_path,
+            'face_anchor' => $face_anchor_path,
+            'matte_report' => $alpha_report_path,
+            'identity_anchor_path' => $identity_anchor_path,
+            'source_selection_path' => $source_selection_path,
+            'repair_report_path' => $repair_report_path,
+            'source_selection' => $source_selection,
+            'repair_report' => $repair_report,
             'fallback_used' => $fallback_used,
             'analysis' => $layer_report,
         ];
+        self::poster_actor_trace('ACTOR_SUCCESS', 'Actor layer preparation completed for one actor.', [
+            'actor_context' => $actor_context,
+            'elapsed_ms' => round((microtime(true) - $actor_started) * 1000, 2),
+            'layer_report' => $layer_report,
+            'layer' => self::poster_actor_trace_file_state($layer_path),
+        ]);
     }
 
+    self::poster_actor_trace('FACE_ANCHOR_BATCH_BEGIN', 'Calling detect_actor_face_anchors_batch() for prepared actors.', [
+        'face_anchor_item_count' => count($face_anchor_items),
+        'layer_dir' => self::poster_actor_trace_file_state($layer_dir),
+    ]);
+    self::detect_actor_face_anchors_batch($face_anchor_items, $layer_dir);
+    self::poster_actor_trace('FACE_ANCHOR_BATCH_END', 'detect_actor_face_anchors_batch() returned for prepared actors.', [
+        'face_anchor_item_count' => count($face_anchor_items),
+        'layer_count' => count($layers),
+        'elapsed_ms' => round((microtime(true) - $path_started) * 1000, 2),
+    ]);
+    self::poster_actor_trace('IDENTITY_LAYER_PATH_EXIT', 'prepare_identity_actor_layers() completed.', [
+        'layer_count' => count($layers),
+        'elapsed_ms' => round((microtime(true) - $path_started) * 1000, 2),
+    ]);
     return $layers;
 }
 
+private static function write_actor_alpha_report($path, $report) {
+    if (!is_string($path) || $path === '') return false;
+    self::poster_actor_trace('FILE_WRITE_BEGIN', 'Writing actor alpha report.', [
+        'path' => self::poster_actor_trace_file_state($path),
+        'report_keys' => is_array($report) ? array_keys($report) : [],
+    ]);
+    $written = file_put_contents($path, wp_json_encode(is_array($report) ? $report : [], JSON_PRETTY_PRINT));
+    @chmod($path, 0664);
+    $ok = file_exists($path) && filesize($path) > 0;
+    self::poster_actor_trace('FILE_WRITE_END', 'Actor alpha report write completed.', [
+        'path' => self::poster_actor_trace_file_state($path),
+        'written' => $written,
+        'ok' => $ok,
+    ]);
+    return $ok;
+}
+
+private static function poster_tool_path($tool_name) {
+    $tool_name = ltrim((string)$tool_name, '/\\');
+    return trailingslashit(dirname(__DIR__)) . 'tools/' . $tool_name;
+}
+
+private static function poster_python_bin() {
+    $preferred = '/opt/cmsg-bgremove/bin/python';
+    if (is_executable($preferred)) {
+        return $preferred;
+    }
+    return 'python3';
+}
+
+private static function run_poster_json_tool($script, $args = []) {
+    $started = microtime(true);
+    $script_path = self::poster_tool_path($script);
+    self::poster_actor_trace('PYTHON_TOOL_ENTER', 'Preparing poster JSON Python tool call.', [
+        'script' => $script,
+        'script_path' => self::poster_actor_trace_file_state($script_path),
+        'args' => $args,
+    ]);
+    if (!is_string($script_path) || $script_path === '' || !file_exists($script_path)) {
+        error_log('CMSG POSTER TOOL ERROR: missing_script script=' . sanitize_text_field((string)$script));
+        self::poster_actor_trace('PYTHON_TOOL_MISSING_SCRIPT', 'Poster JSON Python tool script is missing.', [
+            'script' => $script,
+            'script_path' => self::poster_actor_trace_file_state($script_path),
+        ]);
+        return ['ok' => false, 'reason' => 'missing_script', 'script' => $script];
+    }
+
+    $cmd = escapeshellcmd(self::poster_python_bin()) . ' ' . escapeshellarg($script_path);
+    foreach ((array)$args as $key => $value) {
+        $cmd .= ' --' . preg_replace('/[^a-zA-Z0-9_-]/', '', (string)$key) . ' ' . escapeshellarg((string)$value);
+    }
+    self::poster_actor_trace('SHELL_EXEC_BEFORE', 'Running poster JSON Python tool.', [
+        'operation' => 'run_poster_json_tool',
+        'script' => $script,
+        'python' => self::poster_python_bin(),
+        'script_path' => self::poster_actor_trace_file_state($script_path),
+        'command_length' => strlen($cmd),
+        'args' => $args,
+    ]);
+    $raw = shell_exec($cmd . ' 2>&1');
+    self::poster_actor_trace('SHELL_EXEC_AFTER', 'Poster JSON Python tool returned.', [
+        'operation' => 'run_poster_json_tool',
+        'script' => $script,
+        'elapsed_ms' => round((microtime(true) - $started) * 1000, 2),
+        'raw_length' => strlen((string)$raw),
+        'raw_tail' => substr((string)$raw, -1800),
+    ]);
+    self::poster_actor_trace('JSON_DECODE_BEGIN', 'Decoding poster JSON Python tool output.', [
+        'script' => $script,
+        'raw_length' => strlen((string)$raw),
+    ]);
+    $decoded = self::decode_detector_json_output($raw);
+    self::poster_actor_trace('JSON_DECODE_END', 'Poster JSON Python tool output decoded.', [
+        'script' => $script,
+        'decoded_type' => gettype($decoded),
+        'decoded_keys' => is_array($decoded) ? array_keys($decoded) : [],
+    ]);
+    if (!is_array($decoded) || empty($decoded)) {
+        error_log('CMSG POSTER TOOL ERROR: json_parse_failed script=' . sanitize_text_field((string)$script) . ' raw=' . sanitize_textarea_field(substr((string)$raw, -800)));
+        self::poster_actor_trace('PYTHON_TOOL_JSON_PARSE_FAILED', 'Poster JSON Python tool output could not be decoded.', [
+            'script' => $script,
+            'elapsed_ms' => round((microtime(true) - $started) * 1000, 2),
+            'raw_length' => strlen((string)$raw),
+            'raw_tail' => substr((string)$raw, -1800),
+        ]);
+        return ['ok' => false, 'reason' => 'json_parse_failed', 'raw' => (string)$raw];
+    }
+    self::poster_actor_trace('PYTHON_TOOL_EXIT', 'Poster JSON Python tool completed.', [
+        'script' => $script,
+        'elapsed_ms' => round((microtime(true) - $started) * 1000, 2),
+        'ok' => !empty($decoded['ok']),
+        'reason' => $decoded['reason'] ?? null,
+    ]);
+    return $decoded;
+}
+
+private static function process_actor_matte_with_python($src, $dest, $actor_index, $report_path) {
+    $started = microtime(true);
+    self::poster_actor_trace('MATTE_TOOL_BEGIN', 'Calling cmsg-actor-matte.py.', [
+        'actor_index' => (int)$actor_index,
+        'src' => self::poster_actor_trace_file_state($src),
+        'dest' => self::poster_actor_trace_file_state($dest),
+        'report_path' => self::poster_actor_trace_file_state($report_path),
+    ]);
+    $report = self::run_poster_json_tool('cmsg-actor-matte.py', [
+        'src' => $src,
+        'dest' => $dest,
+        'actor-index' => (int)$actor_index,
+        'padding' => 0.08,
+    ]);
+    self::write_actor_alpha_report($report_path, $report);
+    self::poster_actor_trace('MATTE_TOOL_END', 'cmsg-actor-matte.py returned.', [
+        'actor_index' => (int)$actor_index,
+        'elapsed_ms' => round((microtime(true) - $started) * 1000, 2),
+        'report' => $report,
+        'dest' => self::poster_actor_trace_file_state($dest),
+        'report_path' => self::poster_actor_trace_file_state($report_path),
+    ]);
+
+    if (!empty($report['ok']) && file_exists($dest) && filesize($dest) > 0) {
+        error_log('CMSG ACTOR MATTE NORMALIZED actor_index=' . intval($actor_index) . ' dest=' . sanitize_text_field((string)$dest));
+        return true;
+    }
+
+    error_log('CMSG ACTOR MATTE QUALITY FAIL: python_matte_processor_failed actor_index=' . intval($actor_index) . ' reason=' . sanitize_text_field((string)($report['reason'] ?? 'unknown')));
+    return false;
+}
+
+private static function detect_actor_face_anchor($path, $json_path, $actor_index) {
+    $started = microtime(true);
+    self::poster_actor_trace('FACE_ANCHOR_TOOL_BEGIN', 'Calling detect-face-anchor.py.', [
+        'actor_index' => (int)$actor_index,
+        'image' => self::poster_actor_trace_file_state($path),
+        'json_path' => self::poster_actor_trace_file_state($json_path),
+    ]);
+    $report = self::run_poster_json_tool('detect-face-anchor.py', [
+        'image' => $path,
+        'actor-index' => (int)$actor_index,
+    ]);
+
+    if (empty($report['ok'])) {
+        error_log('CMSG ACTOR FACE ANCHOR FALLBACK method=alpha_geometry actor_index=' . intval($actor_index) . ' reason=' . sanitize_text_field((string)($report['reason'] ?? 'unknown')));
+        $fallback = self::actor_alpha_face_anchor_fallback($path, $actor_index);
+        $report = array_merge(is_array($report) ? $report : [], $fallback, [
+            'ok' => true,
+            'method' => 'alpha_geometry_fallback',
+            'fallback_used' => true,
+        ]);
+    } elseif (($report['method'] ?? '') === 'opencv_haar') {
+        error_log('CMSG ACTOR FACE ANCHOR FALLBACK method=opencv_haar actor_index=' . intval($actor_index));
+    } elseif (($report['method'] ?? '') === 'insightface') {
+        error_log('CMSG ACTOR FACE ANCHOR method=insightface actor_index=' . intval($actor_index));
+    } else {
+        error_log('CMSG ACTOR FACE ANCHOR actor_index=' . intval($actor_index) . ' method=' . sanitize_text_field((string)($report['method'] ?? 'unknown')));
+    }
+
+    self::poster_actor_trace('FILE_WRITE_BEGIN', 'Writing single actor face-anchor report.', [
+        'actor_index' => (int)$actor_index,
+        'json_path' => self::poster_actor_trace_file_state($json_path),
+    ]);
+    $written = file_put_contents($json_path, wp_json_encode($report, JSON_PRETTY_PRINT));
+    @chmod($json_path, 0664);
+    self::poster_actor_trace('FILE_WRITE_END', 'Single actor face-anchor report write completed.', [
+        'actor_index' => (int)$actor_index,
+        'json_path' => self::poster_actor_trace_file_state($json_path),
+        'written' => $written,
+    ]);
+    self::poster_actor_trace('FACE_ANCHOR_TOOL_END', 'detect-face-anchor.py completed.', [
+        'actor_index' => (int)$actor_index,
+        'elapsed_ms' => round((microtime(true) - $started) * 1000, 2),
+        'report' => $report,
+    ]);
+    return $report;
+}
+
+private static function detect_actor_face_anchors_batch($items, $layer_dir) {
+    $started = microtime(true);
+    self::poster_actor_trace('FACE_ANCHOR_BATCH_PATH_ENTER', 'Entered detect_actor_face_anchors_batch().', [
+        'item_count_raw' => count((array)$items),
+        'layer_dir' => self::poster_actor_trace_file_state($layer_dir),
+    ]);
+    $items = array_values(array_filter((array)$items, function($item) {
+        return is_array($item) && isset($item['actor_index'], $item['image']) && file_exists((string)$item['image']);
+    }));
+    if (empty($items)) {
+        self::poster_actor_trace('FACE_ANCHOR_BATCH_PATH_EXIT', 'No valid face-anchor batch items.', [
+            'elapsed_ms' => round((microtime(true) - $started) * 1000, 2),
+        ]);
+        return [];
+    }
+
+    $manifest_path = trailingslashit($layer_dir) . 'actor-face-anchor-input.json';
+    $batch_output_path = trailingslashit($layer_dir) . 'actor-face-anchors.json';
+    $manifest = [];
+    foreach ($items as $item) {
+        $manifest[] = [
+            'actor_index' => (int)$item['actor_index'],
+            'image' => (string)$item['image'],
+        ];
+    }
+    self::poster_actor_trace('FILE_WRITE_BEGIN', 'Writing actor face-anchor batch manifest.', [
+        'manifest_path' => self::poster_actor_trace_file_state($manifest_path),
+        'batch_output_path' => self::poster_actor_trace_file_state($batch_output_path),
+        'manifest_count' => count($manifest),
+    ]);
+    $manifest_written = file_put_contents($manifest_path, wp_json_encode($manifest, JSON_PRETTY_PRINT));
+    @chmod($manifest_path, 0664);
+    self::poster_actor_trace('FILE_WRITE_END', 'Actor face-anchor batch manifest write completed.', [
+        'manifest_path' => self::poster_actor_trace_file_state($manifest_path),
+        'written' => $manifest_written,
+    ]);
+
+    self::poster_actor_trace('FACE_ANCHOR_BATCH_TOOL_BEGIN', 'Calling detect-face-anchors.py.', [
+        'manifest_path' => self::poster_actor_trace_file_state($manifest_path),
+        'batch_output_path' => self::poster_actor_trace_file_state($batch_output_path),
+        'item_count' => count($items),
+    ]);
+    $batch = self::run_poster_json_tool('detect-face-anchors.py', [
+        'input-manifest' => $manifest_path,
+        'output' => $batch_output_path,
+    ]);
+    self::poster_actor_trace('FACE_ANCHOR_BATCH_TOOL_END', 'detect-face-anchors.py returned.', [
+        'elapsed_ms' => round((microtime(true) - $started) * 1000, 2),
+        'batch' => $batch,
+        'batch_output_path' => self::poster_actor_trace_file_state($batch_output_path),
+    ]);
+    if (empty($batch['ok']) || empty($batch['actors']) || !is_array($batch['actors'])) {
+        error_log('CMSG ACTOR FACE ANCHOR FALLBACK method=per_actor_batch_failed reason=' . sanitize_text_field((string)($batch['reason'] ?? 'unknown')));
+        self::poster_actor_trace('FACE_ANCHOR_BATCH_TOOL_END', 'Batch face-anchor failed; falling back to per-actor detection.', [
+            'batch' => $batch,
+            'item_count' => count($items),
+        ]);
+        foreach ($items as $item) {
+            self::detect_actor_face_anchor((string)$item['image'], (string)$item['output'], (int)$item['actor_index']);
+        }
+        return [];
+    }
+
+    $reports = [];
+    foreach ($items as $item) {
+        $actor_index = (int)$item['actor_index'];
+        $key = (string)$actor_index;
+        $report = is_array($batch['actors'][$key] ?? null) ? $batch['actors'][$key] : ['ok' => false, 'reason' => 'missing_batch_actor'];
+        if (empty($report['ok'])) {
+            error_log('CMSG ACTOR FACE ANCHOR FALLBACK method=alpha_geometry actor_index=' . intval($actor_index) . ' reason=' . sanitize_text_field((string)($report['reason'] ?? 'unknown')));
+            $fallback = self::actor_alpha_face_anchor_fallback((string)$item['image'], $actor_index);
+            $report = array_merge($report, $fallback, [
+                'ok' => true,
+                'method' => 'alpha_geometry_fallback',
+                'fallback_used' => true,
+            ]);
+        } elseif (($report['method'] ?? '') === 'insightface') {
+            error_log('CMSG ACTOR FACE ANCHOR method=insightface actor_index=' . intval($actor_index));
+        } elseif (($report['method'] ?? '') === 'opencv_haar') {
+            error_log('CMSG ACTOR FACE ANCHOR FALLBACK method=opencv_haar actor_index=' . intval($actor_index));
+        }
+
+        self::poster_actor_trace('FILE_WRITE_BEGIN', 'Writing batched actor face-anchor report.', [
+            'actor_index' => $actor_index,
+            'output' => self::poster_actor_trace_file_state((string)$item['output']),
+        ]);
+        $written = file_put_contents((string)$item['output'], wp_json_encode($report, JSON_PRETTY_PRINT));
+        @chmod((string)$item['output'], 0664);
+        self::poster_actor_trace('FILE_WRITE_END', 'Batched actor face-anchor report write completed.', [
+            'actor_index' => $actor_index,
+            'output' => self::poster_actor_trace_file_state((string)$item['output']),
+            'written' => $written,
+        ]);
+        $reports[$key] = $report;
+
+        $alpha_report_path = (string)($item['alpha_report'] ?? '');
+        if ($alpha_report_path !== '' && file_exists($alpha_report_path)) {
+            self::poster_actor_trace('FILE_READ_BEGIN', 'Reading actor alpha report to merge face anchor.', [
+                'actor_index' => $actor_index,
+                'alpha_report_path' => self::poster_actor_trace_file_state($alpha_report_path),
+            ]);
+            $alpha_report = json_decode((string)file_get_contents($alpha_report_path), true);
+            self::poster_actor_trace('FILE_READ_END', 'Actor alpha report read for face-anchor merge.', [
+                'actor_index' => $actor_index,
+                'alpha_report_path' => self::poster_actor_trace_file_state($alpha_report_path),
+                'json_ok' => is_array($alpha_report),
+            ]);
+            if (is_array($alpha_report)) {
+                $alpha_report['face_anchor'] = $report;
+                self::write_actor_alpha_report($alpha_report_path, $alpha_report);
+            }
+        }
+    }
+
+    self::poster_actor_trace('FACE_ANCHOR_BATCH_PATH_EXIT', 'detect_actor_face_anchors_batch() completed.', [
+        'elapsed_ms' => round((microtime(true) - $started) * 1000, 2),
+        'report_count' => count($reports),
+    ]);
+    return $reports;
+}
+
+private static function actor_alpha_face_anchor_fallback($path, $actor_index) {
+    $geo = self::actor_alpha_geometry($path);
+    if (empty($geo['ok'])) {
+        return [
+            'actor_index' => (int)$actor_index,
+            'image_width' => 0,
+            'image_height' => 0,
+            'face_bbox' => null,
+            'face_center_norm' => ['x' => 0.50, 'y' => 0.22],
+            'reason' => 'alpha_geometry_unavailable',
+        ];
+    }
+
+    $bbox = $geo['alpha_bbox'];
+    $fw = max(1, (int)round($bbox['w'] * 0.42));
+    $fh = max(1, (int)round($bbox['h'] * 0.30));
+    $fx = (int)round($bbox['x'] + (($bbox['w'] - $fw) / 2));
+    $fy = (int)round($bbox['y'] + ($bbox['h'] * 0.08));
+    return [
+        'actor_index' => (int)$actor_index,
+        'image_width' => (int)$geo['width'],
+        'image_height' => (int)$geo['height'],
+        'face_bbox' => ['x' => $fx, 'y' => $fy, 'w' => $fw, 'h' => $fh],
+        'face_center' => ['x' => $fx + ($fw / 2), 'y' => $fy + ($fh / 2)],
+        'face_center_norm' => [
+            'x' => ($fx + ($fw / 2)) / max(1, (int)$geo['width']),
+            'y' => ($fy + ($fh / 2)) / max(1, (int)$geo['height']),
+        ],
+        'eye_line_y' => $fy + ($fh * 0.38),
+        'forehead_top_y' => $fy + ($fh * 0.08),
+        'chin_y' => $fy + $fh,
+        'reason' => 'fallback_estimate_from_alpha_bbox',
+    ];
+}
+
+private static function actor_alpha_geometry($path) {
+    if (!function_exists('imagecreatefrompng') || !file_exists((string)$path)) return ['ok' => false, 'reason' => 'missing_png'];
+    $img = @imagecreatefrompng($path);
+    if (!$img) return ['ok' => false, 'reason' => 'unreadable_png'];
+    $w = imagesx($img);
+    $h = imagesy($img);
+    $min_x = $w;
+    $min_y = $h;
+    $max_x = -1;
+    $max_y = -1;
+    for ($y = 0; $y < $h; $y++) {
+        for ($x = 0; $x < $w; $x++) {
+            $rgba = imagecolorat($img, $x, $y);
+            $alpha = ($rgba >> 24) & 0x7F;
+            if ($alpha < 118) {
+                $min_x = min($min_x, $x);
+                $min_y = min($min_y, $y);
+                $max_x = max($max_x, $x);
+                $max_y = max($max_y, $y);
+            }
+        }
+    }
+    imagedestroy($img);
+    if ($max_x < $min_x || $max_y < $min_y) return ['ok' => false, 'reason' => 'empty_alpha_bbox'];
+    return [
+        'ok' => true,
+        'width' => $w,
+        'height' => $h,
+        'alpha_bbox' => ['x' => $min_x, 'y' => $min_y, 'w' => $max_x - $min_x + 1, 'h' => $max_y - $min_y + 1],
+    ];
+}
+
+private static function load_actor_face_anchor($path) {
+    if (!is_string($path) || $path === '' || !file_exists($path)) return [];
+    $decoded = json_decode((string)file_get_contents($path), true);
+    return is_array($decoded) ? $decoded : [];
+}
+
+private static function normalize_actor_alpha_matte($src, $dest, $actor_index = 0) {
+    $report = [
+        'ok' => false,
+        'actor_index' => (int)$actor_index,
+        'src' => $src,
+        'dest' => $dest,
+        'width' => 0,
+        'height' => 0,
+        'transparent_ratio' => 0.0,
+        'partial_alpha_ratio' => 0.0,
+        'opaque_ratio' => 0.0,
+        'interior_partial_ratio' => 1.0,
+        'alpha_bbox' => null,
+        'edge_touch' => [
+            'left' => false,
+            'top' => false,
+            'right' => false,
+            'bottom' => false,
+        ],
+        'reason' => '',
+    ];
+
+    if (!function_exists('imagecreatefrompng') || !is_string($src) || !file_exists($src)) {
+        $report['reason'] = 'missing_source';
+        error_log('CMSG ACTOR MATTE QUALITY FAIL: missing_source actor_index=' . intval($actor_index) . ' src=' . (string)$src);
+        return $report;
+    }
+
+    $img = @imagecreatefrompng($src);
+    if (!$img) {
+        $report['reason'] = 'unreadable_png';
+        error_log('CMSG ACTOR MATTE QUALITY FAIL: unreadable_png actor_index=' . intval($actor_index) . ' src=' . (string)$src);
+        return $report;
+    }
+
+    $w = imagesx($img);
+    $h = imagesy($img);
+    $report['width'] = $w;
+    $report['height'] = $h;
+    if ($w <= 0 || $h <= 0) {
+        imagedestroy($img);
+        $report['reason'] = 'empty_dimensions';
+        error_log('CMSG ACTOR MATTE QUALITY FAIL: empty_dimensions actor_index=' . intval($actor_index));
+        return $report;
+    }
+
+    $min_x = $w;
+    $min_y = $h;
+    $max_x = -1;
+    $max_y = -1;
+    for ($y = 0; $y < $h; $y++) {
+        for ($x = 0; $x < $w; $x++) {
+            $rgba = imagecolorat($img, $x, $y);
+            $alpha = ($rgba >> 24) & 0x7F;
+            $opacity = (int)round((127 - $alpha) * 255 / 127);
+            if ($opacity > 20) {
+                $min_x = min($min_x, $x);
+                $min_y = min($min_y, $y);
+                $max_x = max($max_x, $x);
+                $max_y = max($max_y, $y);
+            }
+        }
+    }
+
+    if ($max_x < $min_x || $max_y < $min_y) {
+        imagedestroy($img);
+        $report['reason'] = 'no_nontransparent_bbox';
+        error_log('CMSG ACTOR MATTE QUALITY FAIL: no_nontransparent_bbox actor_index=' . intval($actor_index));
+        return $report;
+    }
+
+    $report['alpha_bbox'] = [
+        'x' => $min_x,
+        'y' => $min_y,
+        'w' => $max_x - $min_x + 1,
+        'h' => $max_y - $min_y + 1,
+    ];
+    $report['edge_touch'] = [
+        'left' => $min_x <= 0,
+        'top' => $min_y <= 0,
+        'right' => $max_x >= $w - 1,
+        'bottom' => $max_y >= $h - 1,
+    ];
+
+    $out = imagecreatetruecolor($w, $h);
+    imagealphablending($out, false);
+    imagesavealpha($out, true);
+    $clear = imagecolorallocatealpha($out, 0, 0, 0, 127);
+    imagefilledrectangle($out, 0, 0, $w, $h, $clear);
+
+    $transparent = 0;
+    $partial = 0;
+    $opaque = 0;
+    $interior_total = 0;
+    $interior_partial = 0;
+    $radius = max(3, (int)round(min($report['alpha_bbox']['w'], $report['alpha_bbox']['h']) * 0.015));
+
+    for ($y = 0; $y < $h; $y++) {
+        for ($x = 0; $x < $w; $x++) {
+            $rgba = imagecolorat($img, $x, $y);
+            $alpha = ($rgba >> 24) & 0x7F;
+            $opacity = (int)round((127 - $alpha) * 255 / 127);
+            $r = ($rgba >> 16) & 0xFF;
+            $g = ($rgba >> 8) & 0xFF;
+            $b = $rgba & 0xFF;
+
+            $is_interior = false;
+            if ($opacity > 20 && $x - $radius >= 0 && $x + $radius < $w && $y - $radius >= 0 && $y + $radius < $h) {
+                $neighbors = [
+                    imagecolorat($img, $x - $radius, $y),
+                    imagecolorat($img, $x + $radius, $y),
+                    imagecolorat($img, $x, $y - $radius),
+                    imagecolorat($img, $x, $y + $radius),
+                ];
+                $is_interior = true;
+                foreach ($neighbors as $neighbor_rgba) {
+                    $neighbor_alpha = ($neighbor_rgba >> 24) & 0x7F;
+                    $neighbor_opacity = (int)round((127 - $neighbor_alpha) * 255 / 127);
+                    if ($neighbor_opacity <= 20) {
+                        $is_interior = false;
+                        break;
+                    }
+                }
+            }
+
+            if ($opacity <= 20) {
+                $new_alpha = 127;
+            } elseif ($is_interior || $opacity >= 110) {
+                $new_alpha = 0;
+            } else {
+                $new_alpha = max(1, min(126, (int)round(127 - ($opacity / 255) * 127)));
+            }
+
+            if ($new_alpha >= 126) {
+                $transparent++;
+            } elseif ($new_alpha > 0) {
+                $partial++;
+            } else {
+                $opaque++;
+            }
+
+            if ($is_interior) {
+                $interior_total++;
+                if ($new_alpha > 0) {
+                    $interior_partial++;
+                }
+            }
+
+            $color = imagecolorallocatealpha($out, $r, $g, $b, $new_alpha);
+            imagesetpixel($out, $x, $y, $color);
+        }
+    }
+
+    $dir = dirname($dest);
+    if (!is_dir($dir)) wp_mkdir_p($dir);
+    $saved = imagepng($out, $dest, 6);
+    imagedestroy($out);
+    imagedestroy($img);
+
+    $total = max(1, $w * $h);
+    $report['transparent_ratio'] = $transparent / $total;
+    $report['partial_alpha_ratio'] = $partial / $total;
+    $report['opaque_ratio'] = $opaque / $total;
+    $report['interior_partial_ratio'] = $interior_total > 0 ? $interior_partial / $interior_total : 1.0;
+    $report['ok'] = $saved
+        && file_exists($dest)
+        && filesize($dest) > 0
+        && $report['partial_alpha_ratio'] <= 0.12
+        && $report['opaque_ratio'] >= 0.20
+        && $report['interior_partial_ratio'] <= 0.05
+        && !empty($report['alpha_bbox']);
+    $report['reason'] = $report['ok'] ? 'actor_matte_normalized' : 'actor_matte_quality_failed';
+
+    if ($report['ok']) {
+        @chmod($dest, 0664);
+        error_log('CMSG ACTOR MATTE NORMALIZED actor_index=' . intval($actor_index) . ' src=' . sanitize_text_field($src) . ' dest=' . sanitize_text_field($dest) . ' partial_alpha_ratio=' . $report['partial_alpha_ratio'] . ' opaque_ratio=' . $report['opaque_ratio'] . ' interior_partial_ratio=' . $report['interior_partial_ratio']);
+    } else {
+        $reason = $report['interior_partial_ratio'] > 0.05 ? 'translucent_subject_interior' : 'actor_matte_quality_failed';
+        $report['reason'] = $reason;
+        error_log('CMSG ACTOR MATTE QUALITY FAIL: ' . $reason . ' actor_index=' . intval($actor_index) . ' src=' . sanitize_text_field($src) . ' report=' . wp_json_encode($report));
+    }
+
+    return $report;
+}
+
+private static function trim_and_pad_actor_cutout($src, $dest, $padding_ratio = 0.08) {
+    if (!function_exists('imagecreatefrompng') || !is_string($src) || !file_exists($src)) {
+        return false;
+    }
+
+    $analysis = self::analyze_actor_layer($src);
+    if (empty($analysis['bounds'])) {
+        return false;
+    }
+
+    $img = @imagecreatefrompng($src);
+    if (!$img) {
+        return false;
+    }
+
+    $w = imagesx($img);
+    $h = imagesy($img);
+    $bounds = $analysis['bounds'];
+    $touches_left = (int)$bounds['x'] <= 0;
+    $touches_top = (int)$bounds['y'] <= 0;
+    $touches_right = ((int)$bounds['x'] + (int)$bounds['w']) >= $w;
+    $touches_bottom = ((int)$bounds['y'] + (int)$bounds['h']) >= $h;
+    $edge_repaired = $touches_left || $touches_top || $touches_right || $touches_bottom;
+
+    $pad_x = max(18, (int)round($bounds['w'] * (float)$padding_ratio));
+    $pad_y = max(18, (int)round($bounds['h'] * (float)$padding_ratio));
+    $pad_top = max($pad_y, (int)round($bounds['h'] * 0.12));
+
+    if ($edge_repaired) {
+        $pad_x = max($pad_x, (int)round($bounds['w'] * 0.16));
+        $pad_y = max($pad_y, (int)round($bounds['h'] * 0.14));
+        $pad_top = max($pad_top, (int)round($bounds['h'] * 0.20));
+    }
+
+    $src_x = max(0, (int)$bounds['x']);
+    $src_y = max(0, (int)$bounds['y']);
+    $src_w = min($w - $src_x, (int)$bounds['w']);
+    $src_h = min($h - $src_y, (int)$bounds['h']);
+
+    $out_w = max(1, $src_w + ($pad_x * 2));
+    $out_h = max(1, $src_h + $pad_top + $pad_y);
+    $out = imagecreatetruecolor($out_w, $out_h);
+    imagealphablending($out, false);
+    imagesavealpha($out, true);
+    $clear = imagecolorallocatealpha($out, 0, 0, 0, 127);
+    imagefilledrectangle($out, 0, 0, $out_w, $out_h, $clear);
+    imagecopy($out, $img, $pad_x, $pad_top, $src_x, $src_y, $src_w, $src_h);
+
+    $dir = dirname($dest);
+    if (!is_dir($dir)) wp_mkdir_p($dir);
+    $saved = imagepng($out, $dest, 6);
+    imagedestroy($out);
+    imagedestroy($img);
+
+    if ($saved) {
+        @chmod($dest, 0664);
+        if ($edge_repaired) {
+            error_log('CMSG ACTOR CUTOUT EDGE REPAIRED src=' . sanitize_text_field($src) . ' dest=' . sanitize_text_field($dest) . ' bounds=' . wp_json_encode($bounds));
+        }
+    }
+
+    return $saved && file_exists($dest) && filesize($dest) > 0;
+}
+
+private static function warn_actor_cutout_edge_touch($layer_path, $actor_index, $source_path = '', $analysis = null) {
+    $analysis = is_array($analysis) ? $analysis : self::analyze_actor_layer($layer_path);
+    if (empty($analysis['bounds']) || empty($analysis['width']) || empty($analysis['height'])) {
+        return;
+    }
+
+    $bounds = $analysis['bounds'];
+    $touches_left = (int)($bounds['x'] ?? 1) <= 0;
+    $touches_top = (int)($bounds['y'] ?? 1) <= 0;
+    $touches_right = ((int)($bounds['x'] ?? 0) + (int)($bounds['w'] ?? 0)) >= (int)$analysis['width'];
+    $touches_bottom = ((int)($bounds['y'] ?? 0) + (int)($bounds['h'] ?? 0)) >= (int)$analysis['height'];
+
+    if ($touches_left && $touches_top && $touches_right && $touches_bottom) {
+        error_log('CMSG ACTOR CUTOUT EDGE TOUCH WARNING actor_index=' . intval($actor_index) . ' layer=' . sanitize_text_field($layer_path) . ' source=' . sanitize_text_field($source_path) . ' bounds=' . wp_json_encode($bounds));
+    }
+}
+
 private static function analyze_actor_layer($path) {
+    $started = microtime(true);
+    self::poster_actor_trace('ANALYZE_ACTOR_LAYER_BEGIN', 'Entered analyze_actor_layer().', [
+        'path' => self::poster_actor_trace_file_state($path),
+        'gd_available' => function_exists('imagecreatefrompng'),
+    ]);
     $report = [
         'ok' => false,
         'path' => $path,
@@ -3401,14 +6311,30 @@ private static function analyze_actor_layer($path) {
 
     if (!function_exists('imagecreatefrompng') || !file_exists($path)) {
         $report['error'] = 'missing_or_unreadable';
+        self::poster_actor_trace('ANALYZE_ACTOR_LAYER_END', 'analyze_actor_layer() failed before PNG load.', [
+            'elapsed_ms' => round((microtime(true) - $started) * 1000, 2),
+            'report' => $report,
+            'path' => self::poster_actor_trace_file_state($path),
+        ]);
         return $report;
     }
 
+    self::poster_actor_trace('FILE_READ_BEGIN', 'Loading actor layer PNG for analysis.', [
+        'path' => self::poster_actor_trace_file_state($path),
+    ]);
     $img = @imagecreatefrompng($path);
     if (!$img) {
         $report['error'] = 'not_readable_png';
+        self::poster_actor_trace('FILE_READ_END', 'Actor layer PNG load failed.', [
+            'elapsed_ms' => round((microtime(true) - $started) * 1000, 2),
+            'report' => $report,
+            'path' => self::poster_actor_trace_file_state($path),
+        ]);
         return $report;
     }
+    self::poster_actor_trace('FILE_READ_END', 'Actor layer PNG loaded for analysis.', [
+        'path' => self::poster_actor_trace_file_state($path),
+    ]);
 
     $w = imagesx($img);
     $h = imagesy($img);
@@ -3417,6 +6343,10 @@ private static function analyze_actor_layer($path) {
     if ($w <= 0 || $h <= 0) {
         imagedestroy($img);
         $report['error'] = 'empty_dimensions';
+        self::poster_actor_trace('ANALYZE_ACTOR_LAYER_END', 'analyze_actor_layer() found empty dimensions.', [
+            'elapsed_ms' => round((microtime(true) - $started) * 1000, 2),
+            'report' => $report,
+        ]);
         return $report;
     }
 
@@ -3495,6 +6425,10 @@ private static function analyze_actor_layer($path) {
     }
 
     imagedestroy($img);
+    self::poster_actor_trace('ANALYZE_ACTOR_LAYER_END', 'analyze_actor_layer() completed.', [
+        'elapsed_ms' => round((microtime(true) - $started) * 1000, 2),
+        'report' => $report,
+    ]);
     return $report;
 }
 
@@ -3528,7 +6462,7 @@ private static function crop_actor_layer_to_subject($src, $out, $analysis = null
     imagefilledrectangle($crop, 0, 0, $crop_w, $crop_h, $transparent);
     imagecopy($crop, $img, 0, 0, $x, $y, $crop_w, $crop_h);
 
-    self::feather_layer_edges($crop, 20, 0.82);
+    self::feather_layer_edges($crop, 3, 0.92);
     imagepng($crop, $out, 6);
     imagedestroy($crop);
     imagedestroy($img);
@@ -3541,7 +6475,7 @@ private static function feather_layer_edges($img, $edge_px = 18, $bottom_start_r
     $h = imagesy($img);
     if ($w <= 0 || $h <= 0) return;
 
-    $edge_px = max(1, (int)$edge_px);
+    $edge_px = max(1, min(4, (int)$edge_px));
     $bottom_start = (int)round($h * (float)$bottom_start_ratio);
     for ($y = 0; $y < $h; $y++) {
         $edge_y = min($y, $h - 1 - $y);
@@ -3568,10 +6502,36 @@ private static function feather_layer_edges($img, $edge_px = 18, $bottom_start_r
 }
 
 private static function create_masked_portrait_layer($asset_path, $out) {
-    if (!function_exists('imagecreatetruecolor') || !function_exists('imagecopyresampled')) return false;
+    $started = microtime(true);
+    self::poster_actor_trace('RECOVERY_BEGIN', 'Entered create_masked_portrait_layer().', [
+        'source' => self::poster_actor_trace_file_state($asset_path),
+        'out' => self::poster_actor_trace_file_state($out),
+        'gd_available' => function_exists('imagecreatetruecolor') && function_exists('imagecopyresampled'),
+    ]);
+    if (!function_exists('imagecreatetruecolor') || !function_exists('imagecopyresampled')) {
+        self::poster_actor_trace('RECOVERY_END', 'GD functions unavailable for masked portrait fallback.', [
+            'elapsed_ms' => round((microtime(true) - $started) * 1000, 2),
+            'source' => self::poster_actor_trace_file_state($asset_path),
+            'out' => self::poster_actor_trace_file_state($out),
+        ]);
+        return false;
+    }
 
+    self::poster_actor_trace('FILE_READ_BEGIN', 'Loading source image for masked portrait fallback.', [
+        'source' => self::poster_actor_trace_file_state($asset_path),
+    ]);
     $actor = self::gd_load_image($asset_path);
-    if (!$actor) return false;
+    if (!$actor) {
+        self::poster_actor_trace('FILE_READ_END', 'Source image load failed for masked portrait fallback.', [
+            'elapsed_ms' => round((microtime(true) - $started) * 1000, 2),
+            'source' => self::poster_actor_trace_file_state($asset_path),
+            'out' => self::poster_actor_trace_file_state($out),
+        ]);
+        return false;
+    }
+    self::poster_actor_trace('FILE_READ_END', 'Source image loaded for masked portrait fallback.', [
+        'source' => self::poster_actor_trace_file_state($asset_path),
+    ]);
 
     $layer_w = 720;
     $layer_h = 1125;
@@ -3579,6 +6539,13 @@ private static function create_masked_portrait_layer($asset_path, $out) {
     $actor_h = imagesy($actor);
     if ($actor_w <= 0 || $actor_h <= 0) {
         imagedestroy($actor);
+        self::poster_actor_trace('RECOVERY_END', 'Source image has empty dimensions for masked portrait fallback.', [
+            'elapsed_ms' => round((microtime(true) - $started) * 1000, 2),
+            'source' => self::poster_actor_trace_file_state($asset_path),
+            'out' => self::poster_actor_trace_file_state($out),
+            'actor_w' => $actor_w,
+            'actor_h' => $actor_h,
+        ]);
         return false;
     }
 
@@ -3608,7 +6575,23 @@ private static function create_masked_portrait_layer($asset_path, $out) {
     $src_x = max(0, min($src_x, $actor_w - $src_w));
     $src_y = max(0, min($src_y, $actor_h - $src_h));
 
+    self::poster_actor_trace('RECOVERY_RESAMPLE_BEGIN', 'Resampling source image into masked portrait fallback layer.', [
+        'source' => self::poster_actor_trace_file_state($asset_path),
+        'out' => self::poster_actor_trace_file_state($out),
+        'actor_w' => $actor_w,
+        'actor_h' => $actor_h,
+        'src_x' => $src_x,
+        'src_y' => $src_y,
+        'src_w' => $src_w,
+        'src_h' => $src_h,
+        'layer_w' => $layer_w,
+        'layer_h' => $layer_h,
+    ]);
     imagecopyresampled($layer, $actor, 0, 0, $src_x, $src_y, $layer_w, $layer_h, $src_w, $src_h);
+    self::poster_actor_trace('RECOVERY_RESAMPLE_END', 'Masked portrait fallback layer resampling completed.', [
+        'source' => self::poster_actor_trace_file_state($asset_path),
+        'out' => self::poster_actor_trace_file_state($out),
+    ]);
     imagedestroy($actor);
 
     for ($py = 0; $py < $layer_h; $py++) {
@@ -3647,10 +6630,26 @@ private static function create_masked_portrait_layer($asset_path, $out) {
         }
     }
 
-    imagepng($layer, $out, 6);
+    self::poster_actor_trace('FILE_WRITE_BEGIN', 'Writing masked portrait fallback layer.', [
+        'out' => self::poster_actor_trace_file_state($out),
+    ]);
+    $written = imagepng($layer, $out, 6);
     imagedestroy($layer);
     @chmod($out, 0664);
-    return file_exists($out) && filesize($out) > 0;
+    $ok = file_exists($out) && filesize($out) > 0;
+    self::poster_actor_trace('FILE_WRITE_END', 'Masked portrait fallback layer write completed.', [
+        'elapsed_ms' => round((microtime(true) - $started) * 1000, 2),
+        'out' => self::poster_actor_trace_file_state($out),
+        'imagepng_result' => $written,
+        'ok' => $ok,
+    ]);
+    self::poster_actor_trace('RECOVERY_END', 'create_masked_portrait_layer() completed.', [
+        'elapsed_ms' => round((microtime(true) - $started) * 1000, 2),
+        'source' => self::poster_actor_trace_file_state($asset_path),
+        'out' => self::poster_actor_trace_file_state($out),
+        'ok' => $ok,
+    ]);
+    return $ok;
 }
 
 private static function gd_copy_alpha_resampled($dst, $src, $dst_x, $dst_y, $dst_w, $dst_h) {
@@ -3671,7 +6670,117 @@ private static function gd_copy_alpha_resampled($dst, $src, $dst_x, $dst_y, $dst
     return true;
 }
 
-private static function composite_campaign_placement_map($background_path, $placement_map, $variant, $composite_path) {
+private static function resolve_actor_render_source($placement_info) {
+    foreach (['final_cutout_path', 'cutout_path', 'layer_path'] as $key) {
+        $path = (string)($placement_info[$key] ?? '');
+        if ($path !== '' && file_exists($path) && filesize($path) > 0) {
+            return [
+                'ok' => true,
+                'path' => $path,
+                'source_key' => $key,
+                'stage' => $key === 'final_cutout_path' ? 'final_matte_cutout' : ($key === 'cutout_path' ? 'prepared_cutout' : 'legacy_layer'),
+            ];
+        }
+    }
+    return ['ok' => false, 'path' => '', 'source_key' => '', 'stage' => 'missing'];
+}
+
+private static function average_image_luma($img, $sample_alpha = true) {
+    if (!$img) return null;
+    $w = imagesx($img);
+    $h = imagesy($img);
+    if ($w <= 0 || $h <= 0) return null;
+    $step_x = max(1, (int)floor($w / 24));
+    $step_y = max(1, (int)floor($h / 24));
+    $sum = 0.0;
+    $count = 0;
+    for ($y = 0; $y < $h; $y += $step_y) {
+        for ($x = 0; $x < $w; $x += $step_x) {
+            $rgba = imagecolorat($img, $x, $y);
+            $alpha = ($rgba >> 24) & 0x7F;
+            if ($sample_alpha && $alpha > 24) continue;
+            $r = ($rgba >> 16) & 0xFF;
+            $g = ($rgba >> 8) & 0xFF;
+            $b = $rgba & 0xFF;
+            $sum += ($r * 0.2126) + ($g * 0.7152) + ($b * 0.0722);
+            $count++;
+        }
+    }
+    return $count > 0 ? ($sum / $count) : null;
+}
+
+private static function average_background_luma_near_slot($canvas, $x, $y, $w, $h) {
+    if (!$canvas) return null;
+    $canvas_w = imagesx($canvas);
+    $canvas_h = imagesy($canvas);
+    $left = max(0, min($canvas_w - 1, (int)$x));
+    $top = max(0, min($canvas_h - 1, (int)$y));
+    $right = max($left, min($canvas_w - 1, (int)($x + $w)));
+    $bottom = max($top, min($canvas_h - 1, (int)($y + $h)));
+    $step_x = max(1, (int)floor(max(1, $right - $left + 1) / 16));
+    $step_y = max(1, (int)floor(max(1, $bottom - $top + 1) / 16));
+    $sum = 0.0;
+    $count = 0;
+    for ($yy = $top; $yy <= $bottom; $yy += $step_y) {
+        for ($xx = $left; $xx <= $right; $xx += $step_x) {
+            $rgb = imagecolorat($canvas, $xx, $yy);
+            $r = ($rgb >> 16) & 0xFF;
+            $g = ($rgb >> 8) & 0xFF;
+            $b = $rgb & 0xFF;
+            $sum += ($r * 0.2126) + ($g * 0.7152) + ($b * 0.0722);
+            $count++;
+        }
+    }
+    return $count > 0 ? ($sum / $count) : null;
+}
+
+private static function harmonize_actor_to_background($actor, $canvas, $x, $y, $w, $h) {
+    $actor_luma = self::average_image_luma($actor, true);
+    $bg_luma = self::average_background_luma_near_slot($canvas, $x, $y, $w, $h);
+    if ($actor_luma === null || $bg_luma === null) return $actor;
+
+    $delta = max(-14, min(14, (int)round(($bg_luma - $actor_luma) * 0.18)));
+    if (abs($delta) < 3) return $actor;
+
+    imagefilter($actor, IMG_FILTER_BRIGHTNESS, $delta);
+    return $actor;
+}
+
+private static function actor_edge_feather_pixels($target_w, $target_h) {
+    $min = min((int)$target_w, (int)$target_h);
+    if ($min < 220) return 1;
+    if ($min < 520) return 2;
+    return 3;
+}
+
+private static function actor_target_face_anchor($slot, $variant, $canvas_w, $canvas_h) {
+    $variant = sanitize_key($variant ?: 'vertical');
+    $role = self::normalize_campaign_actor_role($slot['role'] ?? 'supporting', (int)($slot['actor_index'] ?? 0));
+    $slot_x = (float)($slot['x'] ?? 0.50);
+    $slot_y = (float)($slot['y'] ?? 0.20);
+    $eye_y = $slot_y + 0.08;
+
+    if ($variant === 'banner') {
+        if ($role === 'lead') $eye_y = max(0.20, min(0.38, $slot_y + 0.08));
+        elseif ($role === 'second_lead') $eye_y = max(0.22, min(0.42, $slot_y + 0.09));
+        else $eye_y = max(0.24, min(0.48, $slot_y + 0.10));
+    } else {
+        if ($role === 'lead') $eye_y = max(0.22, min(0.30, $slot_y + 0.08));
+        elseif ($role === 'second_lead') $eye_y = max(0.25, min(0.34, $slot_y + 0.09));
+        elseif ($role === 'supporting') $eye_y = max(0.32, min(0.48, $slot_y + 0.10));
+        else $eye_y = max(0.40, min(0.58, $slot_y + 0.10));
+    }
+
+    return [
+        'x' => (int)round($canvas_w * $slot_x),
+        'eye_y' => (int)round($canvas_h * $eye_y),
+        'x_norm' => $slot_x,
+        'eye_y_norm' => $eye_y,
+        'role' => $role,
+    ];
+}
+
+private static function composite_campaign_placement_map($background_path, $placement_map, $variant, $composite_path, $manifest = []) {
     if (!function_exists('imagecreatefrompng') || !function_exists('imagecopyresampled')) return 0;
     if (!file_exists($background_path) || empty($placement_map) || !is_array($placement_map)) return 0;
 
@@ -3706,7 +6815,8 @@ private static function composite_campaign_placement_map($background_path, $plac
     foreach ($placements as $placement_info) {
         $actor_id = sanitize_key($placement_info['actor_id'] ?? '');
         $actor_index = (int)($placement_info['actor_index'] ?? -1);
-        $layer_path = (string)($placement_info['layer_path'] ?? '');
+        $source_selection = self::resolve_actor_render_source($placement_info);
+        $layer_path = !empty($source_selection['ok']) ? (string)$source_selection['path'] : '';
         $real_layer_path = ($layer_path !== '' && file_exists($layer_path)) ? realpath($layer_path) : '';
         $layer_key = $real_layer_path ?: $layer_path;
 
@@ -3778,6 +6888,68 @@ private static function composite_campaign_placement_map($background_path, $plac
         $x = max((int)round(-0.03 * $target_w), min($x, $canvas_w - (int)round($target_w * 0.97)));
         $y = max(0, min($y, $canvas_h - (int)round($target_h * 0.12)));
 
+        $face_anchor = self::load_actor_face_anchor((string)($placement_info['face_anchor_path'] ?? ''));
+        $target_anchor = [];
+        $pre_anchor_x = $x;
+        $pre_anchor_y = $y;
+        $anchor_adjustment_x = 0;
+        $anchor_adjustment_y = 0;
+        $anchor_method = sanitize_text_field((string)($face_anchor['method'] ?? 'none'));
+
+        if (!empty($face_anchor['face_bbox']) && is_array($face_anchor['face_bbox'])) {
+            $fb = $face_anchor['face_bbox'];
+            $sx = $target_w / max(1, $actor_w);
+            $sy = $target_h / max(1, $actor_h);
+            $face_center = $face_anchor['face_center'] ?? [];
+            $source_face_center_x = isset($face_center['x'])
+                ? (float)$face_center['x']
+                : ((float)($fb['x'] ?? 0) + ((float)($fb['w'] ?? 1) / 2));
+            $source_eye_line_y = isset($face_anchor['eye_line_y'])
+                ? (float)$face_anchor['eye_line_y']
+                : ((float)($fb['y'] ?? 0) + ((float)($fb['h'] ?? 1) * 0.38));
+            $scaled_face_center_x = $source_face_center_x * $sx;
+            $scaled_eye_line_y = $source_eye_line_y * $sy;
+            $target_anchor = self::actor_target_face_anchor($slot, $variant, $canvas_w, $canvas_h);
+            $x = (int)round((int)($target_anchor['x'] ?? $pre_anchor_x) - $scaled_face_center_x);
+            $y = (int)round((int)($target_anchor['eye_y'] ?? $pre_anchor_y) - $scaled_eye_line_y);
+            $x = max((int)round(-0.03 * $target_w), min($x, $canvas_w - (int)round($target_w * 0.97)));
+            $y = max(0, min($y, $canvas_h - (int)round($target_h * 0.12)));
+            $anchor_adjustment_x = $x - $pre_anchor_x;
+            $anchor_adjustment_y = $y - $pre_anchor_y;
+            error_log('CMSG ACTOR FACE ANCHOR ADJUSTED variant=' . $variant . ' actor_id=' . $actor_id . ' method=' . $anchor_method . ' dx=' . $anchor_adjustment_x . ' dy=' . $anchor_adjustment_y . ' target=' . wp_json_encode($target_anchor));
+        }
+
+        $face_box_canvas = null;
+        if (!empty($face_anchor['face_bbox']) && is_array($face_anchor['face_bbox'])) {
+            $fb = $face_anchor['face_bbox'];
+            $sx = $target_w / max(1, $actor_w);
+            $sy = $target_h / max(1, $actor_h);
+            $face_box_canvas = [
+                'x' => $x + (int)round((float)($fb['x'] ?? 0) * $sx),
+                'y' => $y + (int)round((float)($fb['y'] ?? 0) * $sy),
+                'w' => max(1, (int)round((float)($fb['w'] ?? 1) * $sx)),
+                'h' => max(1, (int)round((float)($fb['h'] ?? 1) * $sy)),
+                'method' => sanitize_text_field((string)($face_anchor['method'] ?? 'unknown')),
+            ];
+            $title_zone_y = (int)round($canvas_h * ($variant === 'banner' ? 0.62 : 0.68));
+            if ($face_box_canvas['x'] < 0 || $face_box_canvas['y'] < 0 || ($face_box_canvas['x'] + $face_box_canvas['w']) > $canvas_w || ($face_box_canvas['y'] + $face_box_canvas['h']) > $canvas_h) {
+                $audit['duplicates'][] = ['type' => 'clipped_face_bbox', 'actor_id' => $actor_id, 'actor_index' => $actor_index, 'layer_path' => $layer_path];
+                $audit['ok'] = false;
+                error_log('CMSG LAYERED QUALITY FAIL: clipped_face_bbox variant=' . $variant . ' actor_id=' . $actor_id . ' bbox=' . wp_json_encode($face_box_canvas));
+                imagedestroy($actor);
+                break;
+            }
+            if ($face_box_canvas['y'] + (int)round($face_box_canvas['h'] * 0.60) >= $title_zone_y) {
+                $audit['duplicates'][] = ['type' => 'title_face_intersection', 'actor_id' => $actor_id, 'actor_index' => $actor_index, 'layer_path' => $layer_path];
+                $audit['ok'] = false;
+                error_log('CMSG LAYERED QUALITY FAIL: title_face_intersection variant=' . $variant . ' actor_id=' . $actor_id . ' bbox=' . wp_json_encode($face_box_canvas));
+                imagedestroy($actor);
+                break;
+            }
+            error_log('CMSG ACTOR FACE SAFE PLACEMENT variant=' . $variant . ' actor_id=' . $actor_id . ' method=' . $anchor_method . ' bbox=' . wp_json_encode($face_box_canvas));
+        }
+
+        $actor = self::harmonize_actor_to_background($actor, $canvas, $x, $y, $target_w, $target_h);
         $shadow_strength = max(0.0, min(1.0, (float)($slot['shadow'] ?? 0.62)));
         self::copy_actor_shadow($canvas, $actor, $x + (int)round($target_w * 0.035), $y + (int)round($target_h * 0.025), $target_w, $target_h, $shadow_strength);
         self::gd_copy_alpha_resampled($canvas, $actor, $x, $y, $target_w, $target_h);
@@ -3790,6 +6962,18 @@ private static function composite_campaign_placement_map($background_path, $plac
         $audit['actor_indexes'][] = $actor_index;
         $audit['layer_paths'][] = $layer_path;
 
+        $final_mask_path = preg_replace('/\.png$/i', '-' . sanitize_key($actor_id ?: ('actor_' . $actor_index)) . '-final-mask.png', $composite_path);
+        $final_mask_transform = ['source_path' => $layer_path, 'canvas_w' => $canvas_w, 'canvas_h' => $canvas_h, 'x' => $x, 'y' => $y, 'w' => $target_w, 'h' => $target_h, 'z_index' => (int)($placement_info['z_index'] ?? ($slot['z_index'] ?? $placed))];
+        $final_mask_ok = self::write_transformed_alpha_mask($layer_path, $final_mask_path, $final_mask_transform);
+        $final_mask_stats = $final_mask_ok ? self::alpha_mask_stats($final_mask_path) : [];
+        if (!$final_mask_ok || empty($final_mask_stats['visible_pixels'])) {
+            $audit['duplicates'][] = ['type' => 'recovery_actor_final_mask_missing', 'actor_id' => $actor_id, 'actor_index' => $actor_index, 'layer_path' => $layer_path];
+            $audit['ok'] = false;
+            error_log('CMSG PROFESSIONAL RECOVERY QUALITY FAIL code=recovery_actor_final_mask_missing actor_id=' . $actor_id . ' variant=' . $variant);
+            break;
+        }
+        error_log('CMSG PROFESSIONAL RECOVERY ACTOR MASK actor_id=' . $actor_id . ' path=' . sanitize_text_field((string)$final_mask_path));
+
         $rendered = [
             'actor' => sanitize_text_field($placement_info['label'] ?? self::actor_layer_label($actor_index)),
             'actor_id' => $actor_id,
@@ -3797,7 +6981,25 @@ private static function composite_campaign_placement_map($background_path, $plac
             'actor_index' => $actor_index,
             'source' => (string)($placement_info['source_path'] ?? ''),
             'cutout' => (string)($placement_info['cutout_path'] ?? ''),
+            'final_cutout' => (string)($placement_info['final_cutout_path'] ?? ''),
             'layer' => $layer_path,
+            'render_source_stage' => (string)($source_selection['stage'] ?? ''),
+            'face_anchor_path' => (string)($placement_info['face_anchor_path'] ?? ''),
+            'detected_face_anchor' => $face_anchor,
+            'target_face_anchor' => $target_anchor,
+            'pre_anchor_x' => $pre_anchor_x,
+            'pre_anchor_y' => $pre_anchor_y,
+            'post_anchor_x' => $x,
+            'post_anchor_y' => $y,
+            'anchor_adjustment_x' => $anchor_adjustment_x,
+            'anchor_adjustment_y' => $anchor_adjustment_y,
+            'anchor_method' => $anchor_method,
+            'face_box_canvas' => $face_box_canvas,
+            'final_mask_path' => $final_mask_path,
+            'final_mask_transform' => $final_mask_transform,
+            'final_mask_pixels' => (int)($final_mask_stats['visible_pixels'] ?? 0),
+            'final_mask_canvas_intersection_ratio' => (float)($final_mask_stats['canvas_intersection_ratio'] ?? 0),
+            'final_mask_clipped_ratio' => (float)($final_mask_stats['clipped_ratio'] ?? 0),
             'slot_key' => $slot_key,
             'x' => $x,
             'y' => $y,
@@ -3825,6 +7027,9 @@ private static function composite_campaign_placement_map($background_path, $plac
         error_log('CMSG COMPOSITE PLACED ACTOR ' . ($rendered['actor'] ?? '') . ' actor_id=' . $actor_id . ' path=' . $layer_path . ' x=' . $x . ' y=' . $y . ' w=' . $target_w . ' h=' . $target_h . ' z=' . $rendered['z_index']);
     }
 
+    $vehicle_report = self::render_recovery_prop_layers($canvas, is_array($manifest) ? $manifest : [], $variant, $canvas_w, $canvas_h, $placement_report, $composite_path);
+    $audit['vehicle_report'] = $vehicle_report;
+
     $audit['placed_actor_count'] = $placed;
     if ($placed !== $expected_actor_count) {
         $audit['ok'] = false;
@@ -3842,9 +7047,17 @@ private static function composite_campaign_placement_map($background_path, $plac
     }
 
     if ($audit_ok && $placed === $expected_actor_count) {
-        imagefilter($canvas, IMG_FILTER_COLORIZE, 10, 4, -8, 0);
         imagepng($canvas, $composite_path, 6);
         @chmod($composite_path, 0664);
+        $composite_quality = self::validate_recovery_composite_visual_integrity($composite_path, $background_path, $placement_report, $vehicle_report, $manifest, $variant);
+        $audit['recovery_composite_quality'] = $composite_quality;
+        if (empty($composite_quality['valid'])) {
+            $audit_ok = false;
+            error_log('CMSG PROFESSIONAL RECOVERY QUALITY FAIL code=' . sanitize_text_field((string)($composite_quality['failure_reasons'][0] ?? 'recovery_composite_quality_failed')) . ' variant=' . $variant);
+            @unlink($composite_path);
+        } else {
+            error_log('CMSG PROFESSIONAL RECOVERY QUALITY PASS variant=' . $variant . ' composite=' . sanitize_text_field((string)$composite_path));
+        }
     }
 
     imagedestroy($canvas);
@@ -4003,7 +7216,6 @@ private static function composite_prepared_actor_layers($background_path, $layer
     self::write_campaign_render_audit($audit, $composite_path);
 
     if ($audit_ok && $placed > 0) {
-        imagefilter($canvas, IMG_FILTER_COLORIZE, 10, 4, -8, 0);
         imagepng($canvas, $composite_path, 6);
         @chmod($composite_path, 0664);
     }
@@ -4208,24 +7420,118 @@ public static function blend_selected_actor_face($poster_path, $actor_path, $fac
     return true;
 }
 
-     private static function call_image_generation($api_key, $prompt, $size = '1024x1024') {
+     private static function call_image_generation($api_key, $prompt, $size = '1024x1024', $background = null, $diagnostics = []) {
         if (self::$in_final_generation) {
             self::$final_openai_calls++;
             error_log('CMSG POSTER FINAL TRACE: OPENAI_IMAGE_GENERATION_CALLED_DURING_FINALIZATION size=' . $size);
         }
 
-        return wp_remote_post('https://api.openai.com/v1/images/generations', [
+        $endpoint = 'https://api.openai.com/v1/images/generations';
+        $body = [
+            'model'  => 'gpt-image-1',
+            'prompt' => $prompt,
+            'size'   => $size,
+        ];
+        if (is_string($background) && in_array($background, ['opaque', 'transparent', 'auto'], true)) {
+            $body['background'] = $background;
+        }
+
+        $request_json = wp_json_encode($body, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        $attempt = is_array($diagnostics) ? max(1, (int)($diagnostics['attempt'] ?? 1)) : 1;
+
+        if (is_array($diagnostics) && !empty($diagnostics['request_path'])) {
+            self::write_background_openai_diagnostic($diagnostics['request_path'], [
+                'created_at' => gmdate('c'),
+                'attempt' => $attempt,
+                'retry_reason' => is_string($diagnostics['retry_reason'] ?? '') ? $diagnostics['retry_reason'] : '',
+                'previous_error' => is_array($diagnostics['previous_error'] ?? null) ? $diagnostics['previous_error'] : [],
+                'endpoint' => $endpoint,
+                'http_method' => 'POST',
+                'model' => $body['model'],
+                'size' => $size,
+                'quality' => is_string($body['quality'] ?? '') ? $body['quality'] : '',
+                'background' => is_string($body['background'] ?? '') ? $body['background'] : '',
+                'output_format' => is_string($body['output_format'] ?? '') ? $body['output_format'] : '',
+                'response_format' => is_string($body['response_format'] ?? '') ? $body['response_format'] : '',
+                'encoding' => 'application/json',
+                'request_headers_redacted' => [
+                    'Authorization' => 'Bearer [redacted]',
+                    'Content-Type' => 'application/json',
+                ],
+                'request_body' => $body,
+                'request_body_json' => $request_json,
+                'request_body_sha256' => hash('sha256', (string)$request_json),
+                'prompt_length' => strlen((string)$prompt),
+                'prompt_preview' => substr((string)$prompt, 0, 1000),
+                'input_image_count' => 0,
+                'mask_present' => false,
+            ]);
+            error_log('CMSG BACKGROUND OPENAI REQUEST DIAGNOSTIC path=' . $diagnostics['request_path'] . ' attempt=' . intval($attempt));
+        }
+
+        $started = microtime(true);
+        $response = wp_remote_post($endpoint, [
             'headers' => [
                 'Authorization' => 'Bearer ' . $api_key,
                 'Content-Type'  => 'application/json',
             ],
-            'body' => wp_json_encode([
-                'model'  => 'gpt-image-1',
-                'prompt' => $prompt,
-                'size'   => $size,
-            ]),
+            'body' => $request_json,
             'timeout' => 180,
         ]);
+        $duration_ms = (int)round((microtime(true) - $started) * 1000);
+
+        if (is_array($diagnostics) && !empty($diagnostics['response_path'])) {
+            $response_body = is_wp_error($response) ? '' : wp_remote_retrieve_body($response);
+            $response_code = is_wp_error($response) ? 0 : wp_remote_retrieve_response_code($response);
+            $headers = is_wp_error($response) ? [] : wp_remote_retrieve_headers($response);
+            if (is_object($headers) && method_exists($headers, 'getAll')) {
+                $headers = $headers->getAll();
+            } elseif (!is_array($headers)) {
+                $headers = [];
+            }
+
+            $decoded = is_string($response_body) && $response_body !== '' ? json_decode($response_body, true) : null;
+            $error = self::openai_response_error_summary($response, $response_body);
+            $diagnostic_body = ((int)$response_code >= 200 && (int)$response_code < 300)
+                ? '[omitted_success_body_use_decoded_response_json]'
+                : (string)$response_body;
+            $diagnostic_decoded = is_array($decoded) ? self::sanitize_openai_response_for_diagnostics($decoded) : null;
+
+            self::write_background_openai_diagnostic($diagnostics['response_path'], [
+                'created_at' => gmdate('c'),
+                'attempt' => $attempt,
+                'retry_reason' => is_string($diagnostics['retry_reason'] ?? '') ? $diagnostics['retry_reason'] : '',
+                'previous_error' => is_array($diagnostics['previous_error'] ?? null) ? $diagnostics['previous_error'] : [],
+                'endpoint' => $endpoint,
+                'model' => $body['model'],
+                'http_status' => (int)$response_code,
+                'response_headers' => $headers,
+                'wp_error' => is_wp_error($response),
+                'wp_error_code' => is_wp_error($response) ? $response->get_error_code() : '',
+                'wp_error_message' => is_wp_error($response) ? $response->get_error_message() : '',
+                'raw_response_body' => $diagnostic_body,
+                'wp_remote_retrieve_body' => $diagnostic_body,
+                'wp_remote_retrieve_response_code' => (int)$response_code,
+                'decoded_response_json' => $diagnostic_decoded,
+                'openai_error' => $error,
+                'request_duration_ms' => $duration_ms,
+            ]);
+            error_log('CMSG BACKGROUND OPENAI RESPONSE DIAGNOSTIC path=' . $diagnostics['response_path'] . ' attempt=' . intval($attempt) . ' status=' . intval($response_code));
+
+            self::$last_background_openai_error = self::background_openai_error_trace_fields([
+                'http_status' => $response_code,
+                'openai_error' => $error,
+                'response_path' => (string)$diagnostics['response_path'],
+            ]);
+
+            if (is_wp_error($response)) {
+                error_log('CMSG BACKGROUND OPENAI WP ERROR code=' . $response->get_error_code() . ' message=' . $response->get_error_message());
+            } elseif ((int)$response_code >= 400) {
+                error_log('CMSG BACKGROUND OPENAI HTTP ERROR status=' . intval($response_code) . ' message=' . ($error['message'] ?? '') . ' type=' . ($error['type'] ?? '') . ' code=' . ($error['code'] ?? '') . ' param=' . ($error['param'] ?? ''));
+            }
+        }
+
+        return $response;
     }
 
 private static function normalize_reference_image_for_openai($path) {
@@ -4332,7 +7638,7 @@ foreach ($cast_reference_assets as $cast_asset) {
     if ($normalized) $add_file('image[]', $normalized);
 }
 error_log('CMSG POSTER CAST REF COUNT: ' . count($cast_reference_assets));
-error_log('CMSG POSTER ASSET COUNT: ' . count($brief['poster_assets'] ?? [])); 
+error_log('CMSG POSTER ASSET COUNT: ' . count($brief['poster_assets'] ?? []));
 
         $visual_reference_assets = [];
         if (!empty($brief['poster_assets']) && is_array($brief['poster_assets'])) {
