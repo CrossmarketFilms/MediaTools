@@ -20,6 +20,21 @@ FACE_COMPONENT_UPPER_SUBJECT_CENTER_MAX = 0.62
 FACE_COMPONENT_UPPER_SUBJECT_TOP_MAX = 0.46
 FACE_COMPONENT_CLOSEUP_TOP_MAX = 0.12
 
+POSTER_BODY_CLASSES = ("UNKNOWN", "HEADSHOT", "PROFILE", "BUST", "HALF_BODY", "THREE_QUARTER", "FULL_BODY")
+POSTER_GENERATION_MODES = (
+    "AUTO",
+    "PRESERVE_FULL_BODY",
+    "PRESERVE_BUST",
+    "PRESERVE_HEADSHOT",
+    "EXPAND_BODY",
+    "GENERATE_FULL_BODY",
+    "GENERATE_ACTION_POSE",
+    "GENERATE_CLOSEUP",
+    "GENERATE_SITTING",
+    "GENERATE_RUNNING",
+    "GENERATE_GROUP",
+)
+
 try:
     import cv2  # type: ignore
 except Exception:
@@ -431,6 +446,173 @@ def geometry_for(img, face):
         "geometry_confidence": conf,
     }
 
+def poster_body_class_from_geometry(geometry):
+    cls = str(geometry.get("crop_classification", "")).lower()
+    if cls in ("face_only", "head_and_neck"):
+        return "HEADSHOT"
+    if cls == "bust":
+        return "BUST"
+    if cls == "half_body":
+        return "HALF_BODY"
+    if cls == "three_quarter":
+        return "THREE_QUARTER"
+    if cls == "full_body":
+        return "FULL_BODY"
+    if cls == "profile":
+        return "PROFILE"
+    return "UNKNOWN"
+
+def recommended_generation_mode_for_body(body_class, geometry):
+    if body_class in ("FULL_BODY", "THREE_QUARTER"):
+        return "PRESERVE_FULL_BODY"
+    if body_class == "HALF_BODY":
+        return "EXPAND_BODY"
+    if body_class == "BUST":
+        return "PRESERVE_BUST"
+    if body_class == "HEADSHOT":
+        return "PRESERVE_HEADSHOT"
+    return "AUTO"
+
+def pose_from_geometry(body_class, geometry):
+    cls = str(body_class or "").upper()
+    if cls == "PROFILE":
+        return "profile"
+    clipping = geometry.get("clipping", {}) if isinstance(geometry, dict) else {}
+    if isinstance(clipping, dict) and (clipping.get("left") or clipping.get("right")):
+        return "profile_or_over_shoulder"
+    return "frontal_or_three_quarter"
+
+def body_reference_quality_for_geometry(body_class, geometry):
+    base = {
+        "FULL_BODY": 0.95,
+        "THREE_QUARTER": 0.88,
+        "HALF_BODY": 0.74,
+        "BUST": 0.56,
+        "HEADSHOT": 0.24,
+        "PROFILE": 0.34,
+        "UNKNOWN": 0.12,
+    }.get(body_class, 0.12)
+    geom_conf = float(geometry.get("geometry_confidence", 0.0))
+    shoulder_bonus = 0.08 if int(geometry.get("shoulder_width", 0)) > 0 else 0.0
+    torso_bonus = 0.08 if int(geometry.get("torso_bottom_y", 0)) > 0 else 0.0
+    return round(float(min(1.0, max(0.0, base * 0.72 + geom_conf * 0.20 + shoulder_bonus + torso_bonus))), 4)
+
+def body_report_from_geometry(img, face, geometry=None):
+    geometry = geometry or geometry_for(img, face)
+    body_class = poster_body_class_from_geometry(geometry)
+    clipping = geometry.get("clipping", {})
+    return {
+        "ok": True,
+        "poster_body_class": body_class,
+        "crop_type": body_class.lower(),
+        "body_reference_quality": body_reference_quality_for_geometry(body_class, geometry),
+        "pose": pose_from_geometry(body_class, geometry),
+        "visible_torso": bool(float(geometry.get("body_below_chin_ratio", 0.0)) >= 0.55),
+        "visible_shoulders": bool(int(geometry.get("shoulder_width", 0)) > 0),
+        "visible_legs": bool(body_class in ("THREE_QUARTER", "FULL_BODY")),
+        "camera_angle": "unknown",
+        "body_completeness": round(float(body_reference_quality_for_geometry(body_class, geometry)), 4),
+        "geometry_confidence": float(geometry.get("geometry_confidence", 0.0)),
+        "recommended_generation_mode": recommended_generation_mode_for_body(body_class, geometry),
+        "body_geometry_advisory_only": True,
+        "body_geometry_rejection_allowed": False,
+        "body_geometry": geometry,
+        "clipping": clipping,
+    }
+
+def character_object_from_reports(identity_report, body_report, composition_plan=None):
+    composition_plan = composition_plan or {}
+    return {
+        "schema": "crossmarket.poster.character.v3.3",
+        "identity": {
+            "actor_id": identity_report.get("actor_id", identity_report.get("identity_reference_actor_id", "")),
+            "actor_index": int(identity_report.get("actor_index", 0)),
+            "identity_verified": bool(identity_report.get("identity_anchor_valid") or identity_report.get("identity_verified") or identity_report.get("ok")),
+            "identity_confidence": identity_report.get("identity_confidence", identity_report.get("selected_score", 0.0)),
+            "identity_anchor_bbox": identity_report.get("anchor_face_bbox", identity_report.get("matched_face_bbox", {})),
+            "identity_embedding_path": identity_report.get("anchor_embedding_path", ""),
+            "preserve_face": True,
+            "preserve_expression": True,
+        },
+        "body": {
+            "poster_body_class": body_report.get("poster_body_class", "UNKNOWN"),
+            "crop_type": body_report.get("crop_type", "unknown"),
+            "body_reference_quality": body_report.get("body_reference_quality", 0.0),
+            "body_completeness": body_report.get("body_completeness", 0.0),
+            "visible_torso": bool(body_report.get("visible_torso", False)),
+            "visible_shoulders": bool(body_report.get("visible_shoulders", False)),
+            "visible_legs": bool(body_report.get("visible_legs", False)),
+            "body_geometry_advisory_only": True,
+        },
+        "pose": {
+            "pose": body_report.get("pose", "unknown"),
+            "camera_angle": body_report.get("camera_angle", "unknown"),
+        },
+        "wardrobe": {
+            "source": "preserve_when_visible_generate_when_missing",
+            "generation_allowed": True,
+        },
+        "composition_intent": {
+            "generation_mode": composition_plan.get("poster_generation_mode", body_report.get("recommended_generation_mode", "AUTO")),
+            "framing": composition_plan.get("framing", "poster"),
+            "preserve": composition_plan.get("preserve", ["identity"]),
+            "generate": composition_plan.get("generate", []),
+            "body_geometry_is_advisory": True,
+            "identity_is_hard_gate": True,
+        },
+    }
+
+def composition_plan_from_reports(brief, identity_report, body_report):
+    body_class = body_report.get("poster_body_class", "UNKNOWN")
+    mode = body_report.get("recommended_generation_mode", "AUTO")
+    requested_mode = str(brief.get("poster_generation_mode", "") or "").upper()
+    if requested_mode in POSTER_GENERATION_MODES and requested_mode != "AUTO":
+        mode = requested_mode
+    preserve = ["identity"]
+    generate = []
+    if mode == "PRESERVE_FULL_BODY":
+        preserve.extend(["body", "wardrobe", "pose"])
+    elif mode == "PRESERVE_BUST":
+        preserve.extend(["visible_bust", "visible_wardrobe", "pose_hint"])
+        generate.extend(["missing_lower_body_only_when_template_requires"])
+    elif mode == "PRESERVE_HEADSHOT":
+        preserve.extend(["face", "expression", "head_shape"])
+        generate.extend(["cinematic_body", "wardrobe", "pose"])
+    elif mode == "EXPAND_BODY":
+        preserve.extend(["visible_body", "visible_wardrobe"])
+        generate.extend(["missing_torso", "arms", "hands", "lower_body_continuation", "wardrobe_continuation"])
+    elif mode == "GENERATE_FULL_BODY":
+        generate.extend(["torso", "arms", "legs", "hands", "wardrobe", "pose"])
+    elif mode == "GENERATE_ACTION_POSE":
+        generate.extend(["action_pose", "torso", "arms", "legs", "hands", "wardrobe"])
+    elif mode == "GENERATE_CLOSEUP":
+        preserve.extend(["face"])
+    else:
+        generate.extend(["pose", "wardrobe_continuation"])
+    plan = {
+        "ok": bool(identity_report.get("identity_verified") or identity_report.get("identity_anchor_valid") or identity_report.get("ok")),
+        "schema": "crossmarket.poster.composition_plan.v3.3",
+        "mode": mode,
+        "poster_generation_mode": mode,
+        "body_class": body_class,
+        "pose": brief.get("pose", "hero"),
+        "camera": brief.get("camera", "cinematic poster camera"),
+        "framing": (
+            "full body" if mode == "GENERATE_FULL_BODY"
+            else "headshot" if mode == "PRESERVE_HEADSHOT"
+            else "bust" if mode == "PRESERVE_BUST" or body_class in ("BUST", "HEADSHOT")
+            else "half body"
+        ),
+        "preserve": preserve,
+        "generate": generate,
+        "identity_is_hard_gate": True,
+        "body_geometry_is_advisory": True,
+        "allow_generated_body_completion": mode in ("EXPAND_BODY", "GENERATE_FULL_BODY", "GENERATE_ACTION_POSE", "PRESERVE_HEADSHOT", "AUTO"),
+        "composition_notes": "Identity is mandatory; body geometry only informs generation and placement choices.",
+    }
+    plan["character"] = character_object_from_reports(identity_report, body_report, plan)
+    return plan
+
 def bbox_overlap_ratio(a, b):
     if not a or not b:
         return 0.0
@@ -652,6 +834,40 @@ def identity_anchor(args):
     })
     emit(args.output, report)
 
+def body_analysis(args):
+    img = load_rgba(args.source)
+    faces = detect_faces(img, mode="identity_anchor")
+    selected, face_candidates, decision = choose_identity_anchor_face(img, faces)
+    face = selected.get("_raw_face") if selected else (faces[0] if faces else {"bbox": {}})
+    geometry = geometry_for(img, face)
+    report = body_report_from_geometry(img, face, geometry)
+    report.update({
+        "mode": "body-analysis",
+        "actor_id": args.actor_id,
+        "actor_index": int(args.actor_index),
+        "source": args.source,
+        "source_faces_detected": len(faces),
+        "identity_anchor_candidate_available": bool(selected),
+        "identity_anchor_selection_decision": decision,
+        "detected_faces": [{k: v for k, v in candidate.items() if k != "_raw_face"} for candidate in face_candidates],
+    })
+    emit(args.output, report)
+
+def composition_plan(args):
+    brief = json.loads(Path(args.brief).read_text(encoding="utf-8")) if args.brief and Path(args.brief).exists() else {}
+    identity_report = json.loads(Path(args.identity_report).read_text(encoding="utf-8")) if args.identity_report and Path(args.identity_report).exists() else {}
+    body_report = json.loads(Path(args.body_report).read_text(encoding="utf-8")) if args.body_report and Path(args.body_report).exists() else {}
+    report = composition_plan_from_reports(brief, identity_report, body_report)
+    report.update({
+        "mode": "composition-plan",
+        "schema": "crossmarket.poster.composition_plan.v3.3",
+        "actor_id": identity_report.get("actor_id", brief.get("actor_id", "")),
+        "actor_index": identity_report.get("actor_index", brief.get("actor_index", 0)),
+        "identity_confidence": identity_report.get("identity_confidence", identity_report.get("selected_score", 0.0)),
+        "body_reference_quality": body_report.get("body_reference_quality", 0.0),
+    })
+    emit(args.output, report)
+
 def select_source(args):
     payload = json.loads(Path(args.input_manifest).read_text(encoding="utf-8"))
     anchor_path = payload.get("identity_anchor_path", "")
@@ -709,38 +925,47 @@ def select_source(args):
             item["identity_verification_decision"] = "identity_rejected_no_plausible_face"
             item["authoritative_anchor_verification_decision"] = "identity_rejected_no_authoritative_anchor_candidate"
         if item["identity_verified"]:
-            crop_ok = item.get("crop_classification") in ("bust", "half_body")
-            geom_ok = item.get("shoulder_width", 0) > 0 and item.get("torso_bottom_y", 0) > 0
-            if crop_ok and geom_ok:
-                item["candidate_preference_score"] = round(float(source_candidate_preference(item)), 4)
-                score = item["matched_face_score"] + item.get("geometry_confidence", 0) + item["candidate_preference_score"]
-                if best is None or score > best[0]:
-                    best = (score, item, path)
-            else:
-                item["identity_failure_reason"] = "actor_layer_body_source_unavailable"
+            body_report = body_report_from_geometry(img, best_face["_raw_face"], {k: item[k] for k in item.keys() if k in ("face_bbox","face_height","face_width","eye_line_y","estimated_chin_y","subject_alpha_bounds","body_pixels_below_chin","body_below_chin_ratio","shoulder_line_y","shoulder_width","shoulder_width_to_face_width","torso_bottom_y","torso_height_below_shoulders","face_to_subject_height_ratio","top_headroom","clipping","crop_classification","geometry_confidence")}) if plausible else {}
+            item["body_report"] = body_report
+            item["poster_body_class"] = body_report.get("poster_body_class", poster_body_class_from_geometry(item))
+            item["body_reference_quality"] = body_report.get("body_reference_quality", 0.0)
+            item["recommended_generation_mode"] = body_report.get("recommended_generation_mode", "AUTO")
+            item["body_geometry_advisory_only"] = True
+            item["character"] = character_object_from_reports(anchor, body_report, composition_plan_from_reports(payload.get("brief", {}), anchor, body_report))
+            item["candidate_preference_score"] = round(float(source_candidate_preference(item)), 4)
+            geometry_bonus = float(item.get("geometry_confidence", 0.0)) * 0.25
+            body_bonus = float(item.get("body_reference_quality", 0.0)) * 0.35
+            score = item["matched_face_score"] + geometry_bonus + body_bonus + item["candidate_preference_score"]
+            if best is None or score > best[0]:
+                best = (score, item, path)
         report["candidates"].append(item)
     if best:
         _, item, path = best
-        report.update({"ok": True, "selected_source": path, "selected_candidate_type": item["candidate_type"], "selected_score": round(float(best[0]), 4), "selection_reason": "identity-verified candidate with usable face/body geometry"})
-        for k in ("matched_face_index","matched_face_bbox","matched_face_score","second_best_score","match_margin","plausible_match_margin","authoritative_anchor_match_margin","plausible_faces_detected","best_plausible_face","second_best_plausible_face","authoritative_anchor_candidates","identity_verified","identity_verification_decision","authoritative_anchor_verification_decision","crop_classification","geometry_confidence","face_bbox","estimated_chin_y","shoulder_line_y","shoulder_width","torso_bottom_y","body_below_chin_ratio","face_to_subject_height_ratio","candidate_preference_score"):
+        report.update({"ok": True, "selected_source": path, "selected_candidate_type": item["candidate_type"], "selected_score": round(float(best[0]), 4), "selection_reason": "identity-verified candidate selected; body geometry is advisory"})
+        for k in ("matched_face_index","matched_face_bbox","matched_face_score","second_best_score","match_margin","plausible_match_margin","authoritative_anchor_match_margin","plausible_faces_detected","best_plausible_face","second_best_plausible_face","authoritative_anchor_candidates","identity_verified","identity_verification_decision","authoritative_anchor_verification_decision","crop_classification","geometry_confidence","face_bbox","estimated_chin_y","shoulder_line_y","shoulder_width","torso_bottom_y","body_below_chin_ratio","face_to_subject_height_ratio","candidate_preference_score","poster_body_class","body_reference_quality","recommended_generation_mode","body_geometry_advisory_only","body_report"):
             if k in item: report[k] = item[k]
     else:
-        report["failure_reason"] = "actor_layer_body_source_unavailable"
+        report["failure_reason"] = "actor_identity_verification_failed"
     emit(args.output, report)
 
 def main():
     p = argparse.ArgumentParser(description="Analyze poster actor identity anchors and body-aware source candidates.")
-    p.add_argument("--mode", required=True, choices=["identity-anchor","select-source"])
+    p.add_argument("--mode", required=True, choices=["identity-anchor","select-source","body-analysis","composition-plan"])
     p.add_argument("--actor-id", default="")
     p.add_argument("--actor-index", default=0, type=int)
     p.add_argument("--source", default="")
     p.add_argument("--output", required=True)
     p.add_argument("--crop-output", default="")
     p.add_argument("--input-manifest", default="")
+    p.add_argument("--identity-report", default="")
+    p.add_argument("--body-report", default="")
+    p.add_argument("--brief", default="")
     p.add_argument("--threshold", default=0.62, type=float)
     p.add_argument("--margin", default=0.08, type=float)
     args = p.parse_args()
     if args.mode == "identity-anchor": identity_anchor(args)
+    elif args.mode == "body-analysis": body_analysis(args)
+    elif args.mode == "composition-plan": composition_plan(args)
     else: select_source(args)
 
 if __name__ == "__main__":

@@ -82,7 +82,7 @@ def test_authoritative_anchor_projects_to_candidates():
     assert projected == {"x": 220, "y": 110, "w": 200, "h": 240}
 
 
-def test_identity_verified_face_only_candidate_is_not_selectable_geometry():
+def test_identity_verified_face_only_candidate_is_body_advisory():
     img = Image.new("RGBA", (360, 420), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     draw.rectangle((100, 30, 259, 249), fill=SKIN)
@@ -90,7 +90,12 @@ def test_identity_verified_face_only_candidate_is_not_selectable_geometry():
     face = {"bbox": {"x": 100, "y": 30, "w": 160, "h": 220}}
     geom = analyzer.geometry_for(img, face)
     assert geom["crop_classification"] in ("face_only", "head_and_neck")
-    assert geom["crop_classification"] not in ("bust", "half_body")
+    report = analyzer.body_report_from_geometry(img, face, geom)
+    assert report["ok"] is True
+    assert report["body_geometry_advisory_only"] is True
+    assert report["body_geometry_rejection_allowed"] is False
+    assert report["poster_body_class"] == "HEADSHOT"
+    assert report["recommended_generation_mode"] == "PRESERVE_HEADSHOT"
 
 
 def test_valid_identity_verified_bust_candidate_can_be_selected():
@@ -220,7 +225,7 @@ def test_identity_anchor_rejects_when_no_valid_plausible_candidate_exists():
     assert decision["rejection_reason"] == "actor_identity_anchor_not_found"
 
 
-def run_select_source_with_plausible(plausible_faces, threshold=0.82, margin=0.08):
+def run_select_source_with_plausible(plausible_faces, threshold=0.82, margin=0.08, crop_classification="half_body"):
     original_load = analyzer.load_rgba
     original_detect = analyzer.detect_faces
     original_ranked = analyzer.ranked_plausible_source_faces
@@ -233,15 +238,15 @@ def run_select_source_with_plausible(plausible_faces, threshold=0.82, margin=0.0
         analyzer.detect_faces = lambda image, mode="body_source": [{"bbox": face["bbox"]} for face in plausible_faces]
         analyzer.ranked_plausible_source_faces = lambda image, faces, anchor_emb, anchor_projector=None: (plausible_faces, plausible_faces)
         analyzer.geometry_for = lambda image, face: {
-            "crop_classification": "half_body",
-            "geometry_confidence": 0.86,
+            "crop_classification": crop_classification,
+            "geometry_confidence": 0.78 if crop_classification == "face_only" else 0.86,
             "face_bbox": face["bbox"],
             "estimated_chin_y": face["bbox"]["y"] + face["bbox"]["h"],
             "shoulder_line_y": face["bbox"]["y"] + face["bbox"]["h"] + 30,
-            "shoulder_width": 220,
-            "torso_bottom_y": 820,
-            "body_below_chin_ratio": 1.1,
-            "face_to_subject_height_ratio": 0.25,
+            "shoulder_width": 0 if crop_classification == "face_only" else 220,
+            "torso_bottom_y": 0 if crop_classification == "face_only" else 820,
+            "body_below_chin_ratio": 0.1 if crop_classification == "face_only" else 1.1,
+            "face_to_subject_height_ratio": 0.55 if crop_classification == "face_only" else 0.25,
             "clipping": {},
         }
         analyzer.alpha_bounds = lambda image: {"x": 40, "y": 20, "w": 520, "h": 860}
@@ -327,7 +332,7 @@ def test_select_source_rejects_best_score_below_threshold():
         plausible_source_face(1, 0.20),
     ], threshold=0.82)
     assert report["ok"] is False
-    assert report["failure_reason"] == "actor_layer_body_source_unavailable"
+    assert report["failure_reason"] == "actor_identity_verification_failed"
     candidate = report["candidates"][0]
     assert candidate["identity_verified"] is False
     assert candidate["identity_failure_reason"] == "identity_match_below_threshold"
@@ -337,11 +342,85 @@ def test_select_source_rejects_best_score_below_threshold():
 def test_select_source_rejects_when_no_plausible_faces():
     report = run_select_source_with_plausible([])
     assert report["ok"] is False
-    assert report["failure_reason"] == "actor_layer_body_source_unavailable"
+    assert report["failure_reason"] == "actor_identity_verification_failed"
     candidate = report["candidates"][0]
     assert candidate["identity_verified"] is False
     assert candidate["identity_failure_reason"] == "no_plausible_face_detected"
     assert candidate["identity_verification_decision"] == "identity_rejected_no_plausible_face"
+
+
+def test_select_source_accepts_identity_verified_headshot_candidate():
+    report = run_select_source_with_plausible([
+        plausible_source_face(0, 0.93),
+    ], crop_classification="face_only")
+    assert report["ok"] is True, report
+    assert report["identity_verified"] is True
+    assert report["body_geometry_advisory_only"] is True
+    assert report["poster_body_class"] == "HEADSHOT"
+    assert report["recommended_generation_mode"] == "PRESERVE_HEADSHOT"
+    assert report["selection_reason"] == "identity-verified candidate selected; body geometry is advisory"
+
+
+def test_body_analysis_service_reports_headshot_without_failure():
+    img = Image.new("RGBA", (360, 420), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle((100, 30, 259, 249), fill=SKIN)
+    draw.rectangle((118, 250, 241, 295), fill=BODY)
+    face = {"bbox": {"x": 100, "y": 30, "w": 160, "h": 220}}
+    report = analyzer.body_report_from_geometry(img, face)
+    assert report["ok"] is True
+    assert report["poster_body_class"] == "HEADSHOT"
+    assert report["recommended_generation_mode"] == "PRESERVE_HEADSHOT"
+
+
+def test_composition_plan_preserves_headshot_and_generates_cinematic_body():
+    plan = analyzer.composition_plan_from_reports(
+        {"pose": "hero", "camera": "low angle"},
+        {"ok": True, "identity_verified": True, "identity_confidence": 0.93},
+        {"ok": True, "poster_body_class": "HEADSHOT", "recommended_generation_mode": "PRESERVE_HEADSHOT", "body_reference_quality": 0.18},
+    )
+    assert plan["ok"] is True
+    assert plan["poster_generation_mode"] == "PRESERVE_HEADSHOT"
+    assert "identity" in plan["preserve"]
+    assert "cinematic_body" in plan["generate"]
+    assert plan["body_geometry_is_advisory"] is True
+
+
+def test_composition_plan_preserves_bust_without_hard_body_gate():
+    plan = analyzer.composition_plan_from_reports(
+        {"pose": "dramatic stillness", "camera": "medium poster camera"},
+        {"ok": True, "identity_verified": True, "identity_confidence": 0.9},
+        {"ok": True, "poster_body_class": "BUST", "recommended_generation_mode": "PRESERVE_BUST", "body_reference_quality": 0.56},
+    )
+    assert plan["ok"] is True
+    assert plan["poster_generation_mode"] == "PRESERVE_BUST"
+    assert "visible_bust" in plan["preserve"]
+    assert "missing_lower_body_only_when_template_requires" in plan["generate"]
+    assert plan["body_geometry_is_advisory"] is True
+
+
+def test_character_object_separates_identity_body_and_composition_intent():
+    character = analyzer.character_object_from_reports(
+        {"ok": True, "identity_verified": True, "identity_confidence": 0.91, "anchor_face_bbox": {"x": 10, "y": 20, "w": 80, "h": 120}},
+        {"ok": True, "poster_body_class": "BUST", "pose_class": "portrait_bust", "recommended_generation_mode": "AUTO", "body_geometry_advisory_only": True},
+        {"poster_generation_mode": "AUTO", "slot_intent": "primary_lead"},
+    )
+    assert character["schema"] == "crossmarket.poster.character.v3.3"
+    assert character["identity"]["identity_verified"] is True
+    assert character["body"]["body_geometry_advisory_only"] is True
+    assert character["composition_intent"]["generation_mode"] == "AUTO"
+    assert character["composition_intent"]["body_geometry_is_advisory"] is True
+    assert character["composition_intent"]["identity_is_hard_gate"] is True
+
+
+def test_composition_plan_accepts_explicit_generation_mode():
+    plan = analyzer.composition_plan_from_reports(
+        {"poster_generation_mode": "GENERATE_ACTION_POSE"},
+        {"ok": True, "identity_verified": True, "identity_confidence": 0.88},
+        {"ok": True, "poster_body_class": "HALF_BODY", "recommended_generation_mode": "AUTO", "body_reference_quality": 0.72},
+    )
+    assert plan["poster_generation_mode"] == "GENERATE_ACTION_POSE"
+    assert plan["character"]["composition_intent"]["generation_mode"] == "GENERATE_ACTION_POSE"
 
 
 def run():
@@ -351,7 +430,7 @@ def run():
         test_real_upper_bust_face_is_accepted,
         test_tiny_skin_components_rejected,
         test_authoritative_anchor_projects_to_candidates,
-        test_identity_verified_face_only_candidate_is_not_selectable_geometry,
+        test_identity_verified_face_only_candidate_is_body_advisory,
         test_valid_identity_verified_bust_candidate_can_be_selected,
         test_missing_or_invalid_anchor_geometry_fails_closed,
         test_no_reliable_face_fails_identity_anchor,
@@ -362,6 +441,12 @@ def run():
         test_select_source_verifies_multiple_plausible_faces_large_margin_above_threshold,
         test_select_source_rejects_best_score_below_threshold,
         test_select_source_rejects_when_no_plausible_faces,
+        test_select_source_accepts_identity_verified_headshot_candidate,
+        test_body_analysis_service_reports_headshot_without_failure,
+        test_composition_plan_preserves_headshot_and_generates_cinematic_body,
+        test_composition_plan_preserves_bust_without_hard_body_gate,
+        test_character_object_separates_identity_body_and_composition_intent,
+        test_composition_plan_accepts_explicit_generation_mode,
     ]
     for test in tests:
         test()

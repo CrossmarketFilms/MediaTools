@@ -23,16 +23,34 @@ def compare_to_anchor(image_path, anchor_json, threshold, margin):
     if not anchor_emb:
         return {"verified": False, "score": 0.0, "margin": 0.0, "face": {}, "geometry": {}, "reason": "no_identity_comparison"}
     img = actor_sources.load_rgba(image_path)
-    faces = actor_sources.detect_faces(img)
-    scores = []
-    for idx, face in enumerate(faces):
-        scores.append((actor_sources.cosine(anchor_emb, actor_sources.embedding_for_face(img, face["bbox"])), idx, face))
-    scores.sort(reverse=True, key=lambda x: x[0])
-    if not scores:
+    faces = actor_sources.detect_faces(img, mode="body_source")
+    anchor_projector = actor_sources.project_anchor_bbox_to_candidate(anchor)
+    evaluated, plausible = actor_sources.ranked_plausible_source_faces(img, faces, anchor_emb, anchor_projector)
+    if not plausible:
         return {"verified": False, "score": 0.0, "margin": 0.0, "face": {}, "geometry": {}, "reason": "no_face_detected"}
-    second = scores[1][0] if len(scores) > 1 else 0.0
-    ok = scores[0][0] >= threshold and (len(scores) == 1 or scores[0][0] - second >= margin)
-    return {"verified": bool(ok), "score": round(float(scores[0][0]), 4), "margin": round(float(scores[0][0] - second), 4), "face": scores[0][2]["bbox"], "geometry": actor_sources.geometry_for(img, scores[0][2]), "reason": "" if ok else "identity_match_below_threshold_or_margin"}
+    best = plausible[0]
+    second = float(plausible[1]["_embedding_score_raw"]) if len(plausible) > 1 else 0.0
+    score = float(best["_embedding_score_raw"])
+    ok = score >= threshold
+    return {
+        "verified": bool(ok),
+        "score": round(score, 4),
+        "margin": round(float(score - second), 4),
+        "face": best["bbox"],
+        "geometry": actor_sources.geometry_for(img, best["_raw_face"]),
+        "body_report": actor_sources.body_report_from_geometry(img, best["_raw_face"]),
+        "detected_faces": [{k: v for k, v in item.items() if not k.startswith("_")} for item in evaluated],
+        "plausible_faces": [{k: v for k, v in item.items() if not k.startswith("_")} for item in plausible],
+        "reason": "" if ok else "identity_match_below_threshold",
+    }
+
+def load_plan(path):
+    if not path or not Path(path).exists():
+        return {"poster_generation_mode": "AUTO", "generate": [], "preserve": ["identity"]}
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return {"poster_generation_mode": "AUTO", "generate": [], "preserve": ["identity"], "plan_parse_error": True}
 
 def clean_alpha(src, dest):
     img = Image.open(src).convert("RGBA")
@@ -50,12 +68,34 @@ def main():
     p.add_argument("--actor-index", type=int, default=0)
     p.add_argument("--original-source", default="")
     p.add_argument("--identity-reference", required=True)
+    p.add_argument("--composition-plan", default="")
     p.add_argument("--report", required=True)
     p.add_argument("--threshold", type=float, default=0.62)
     p.add_argument("--margin", type=float, default=0.08)
     args = p.parse_args()
+    plan = load_plan(args.composition_plan)
     src_cmp = compare_to_anchor(args.src, args.identity_reference, args.threshold, args.margin)
-    report = {"ok": False, "repair_mode": "derivative_cleanup", "input_derivative": args.src, "original_source_used": args.original_source, "identity_reference_type": "actor_identity_anchor_json", "actor_index": args.actor_index, "source_face_match_verified": src_cmp["verified"], "matched_face_score": src_cmp["score"], "match_margin": src_cmp["margin"], "matched_face_bbox": src_cmp["face"], "output_face_match_verified": False, "output_face_match_score": 0.0, "repair_actions": [], "failure_reason": ""}
+    generation_mode = str(plan.get("poster_generation_mode", "AUTO") or "AUTO")
+    report = {
+        "ok": False,
+        "repair_mode": "identity_locked_layer_cleanup",
+        "poster_generation_mode": generation_mode,
+        "composition_plan_path": args.composition_plan,
+        "composition_plan": plan,
+        "input_derivative": args.src,
+        "original_source_used": args.original_source,
+        "identity_reference_type": "actor_identity_anchor_json",
+        "actor_index": args.actor_index,
+        "source_face_match_verified": src_cmp["verified"],
+        "matched_face_score": src_cmp["score"],
+        "match_margin": src_cmp["margin"],
+        "matched_face_bbox": src_cmp["face"],
+        "source_body_report": src_cmp.get("body_report", {}),
+        "output_face_match_verified": False,
+        "output_face_match_score": 0.0,
+        "repair_actions": [],
+        "failure_reason": "",
+    }
     if not src_cmp["verified"]:
         report["failure_reason"] = src_cmp["reason"] or "source_identity_not_verified"
         write(args.report, report); return
@@ -64,6 +104,7 @@ def main():
     report["output_face_match_verified"] = out_cmp["verified"]
     report["output_face_match_score"] = out_cmp["score"]
     report["output_match_margin"] = out_cmp["margin"]
+    report["output_body_report"] = out_cmp.get("body_report", {})
     geom = out_cmp.get("geometry") or {}
     report.update({
         "face_bbox": geom.get("face_bbox", {}),
@@ -77,15 +118,15 @@ def main():
         "geometry_confidence": geom.get("geometry_confidence", 0),
         "repair_actions": ["conservative_alpha_cleanup"],
     })
-    required = [report["face_bbox"], report["chin_y"], report["shoulder_width"], report["torso_bottom_y"]]
     if not out_cmp["verified"]:
         report["failure_reason"] = out_cmp["reason"] or "output_identity_not_verified"
-    elif any(v == 0 or v == {} for v in required):
-        report["failure_reason"] = "recovery_actor_geometry_incomplete"
-    elif report["crop_classification"] not in ("bust", "half_body"):
-        report["failure_reason"] = "actor_layer_body_source_unavailable"
     else:
         report["ok"] = True
+        report["repair_actions"] = [
+            "conservative_alpha_cleanup",
+            "body_geometry_recorded_as_advisory",
+            "composition_plan_consumed",
+        ]
     write(args.report, report)
 
 if __name__ == "__main__":

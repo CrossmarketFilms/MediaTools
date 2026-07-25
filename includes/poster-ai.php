@@ -3399,7 +3399,7 @@ private static function prepare_campaign_actor_cutouts($brief, $layer_dir, $acto
         'layer_dir' => $layer_dir,
     ]);
     $identity_started = microtime(true);
-    $layers = self::prepare_identity_actor_layers($records, $layer_dir);
+    $layers = self::prepare_identity_actor_layers($records, $layer_dir, is_array($brief) ? $brief : []);
     self::poster_actor_trace('IDENTITY_LAYERS_CALL_AFTER', 'Returned from prepare_identity_actor_layers().', [
         'elapsed_ms' => (int)round((microtime(true) - $identity_started) * 1000),
         'result_type' => is_wp_error($layers) ? 'WP_Error' : gettype($layers),
@@ -3727,6 +3727,7 @@ private static function select_best_poster_actor_source($context, $source_select
         'actor_id' => sanitize_key($context['actor_id'] ?? ''),
         'actor_index' => (int)($context['actor_index'] ?? 0),
         'identity_anchor_path' => (string)($context['identity_anchor_path'] ?? ''),
+        'brief' => is_array($context['brief'] ?? null) ? $context['brief'] : [],
         'candidates' => $candidates,
     ];
     self::poster_actor_trace('SOURCE_SELECTION_MANIFEST_WRITE_BEGIN', 'Writing actor source-selection manifest.', [
@@ -3785,7 +3786,110 @@ private static function select_best_poster_actor_source($context, $source_select
     return $report;
 }
 
-private static function repair_actor_layer_for_poster($src, $dest, $actor_index, $original_source, $identity_reference, $report_path) {
+private static function analyze_actor_body_for_poster($src, $actor_index, $actor_id, $report_path) {
+    self::poster_actor_trace('BODY_ANALYSIS_TOOL_BEGIN', 'Calling poster_body_analysis_service.py.', [
+        'actor_index' => (int)$actor_index,
+        'actor_id' => sanitize_key($actor_id),
+        'source' => self::poster_actor_trace_file_state($src),
+        'report_path' => $report_path,
+    ]);
+    $report = self::run_poster_json_tool('poster_body_analysis_service.py', [
+        'source' => $src,
+        'actor-index' => (int)$actor_index,
+        'actor-id' => sanitize_key($actor_id),
+        'output' => $report_path,
+    ]);
+    if (!is_array($report) || empty($report)) {
+        $report = [
+            'ok' => true,
+            'mode' => 'body-analysis',
+            'actor_index' => (int)$actor_index,
+            'actor_id' => sanitize_key($actor_id),
+            'poster_body_class' => 'UNKNOWN',
+            'recommended_generation_mode' => 'AUTO',
+            'body_geometry_advisory_only' => true,
+            'body_geometry_rejection_allowed' => false,
+            'warning' => 'body_analysis_unavailable',
+        ];
+    } else {
+        $report['ok'] = true;
+        $report['body_geometry_advisory_only'] = true;
+        $report['body_geometry_rejection_allowed'] = false;
+    }
+    self::write_actor_alpha_report($report_path, $report);
+    self::poster_actor_trace('BODY_ANALYSIS_TOOL_END', 'poster_body_analysis_service.py returned.', [
+        'actor_index' => (int)$actor_index,
+        'actor_id' => sanitize_key($actor_id),
+        'report_path' => self::poster_actor_trace_file_state($report_path),
+        'poster_body_class' => $report['poster_body_class'] ?? '',
+        'recommended_generation_mode' => $report['recommended_generation_mode'] ?? '',
+        'body_geometry_advisory_only' => $report['body_geometry_advisory_only'] ?? null,
+    ]);
+    return $report;
+}
+
+private static function build_actor_composition_plan_for_poster($brief, $identity_report, $body_report, $actor_index, $actor_id, $report_path) {
+    $brief = is_array($brief) ? $brief : [];
+    $brief_path = preg_replace('/\.json$/i', '-brief.json', (string)$report_path);
+    file_put_contents($brief_path, wp_json_encode([
+        'actor_id' => sanitize_key($actor_id),
+        'actor_index' => (int)$actor_index,
+        'title' => sanitize_text_field($brief['title'] ?? ($brief['movie_title'] ?? '')),
+        'genre' => sanitize_text_field($brief['genre'] ?? ''),
+        'mood' => sanitize_text_field($brief['mood'] ?? ''),
+        'poster_layout' => sanitize_key($brief['poster_layout'] ?? ''),
+        'style_preset' => sanitize_key($brief['style_preset'] ?? ''),
+        'poster_description' => sanitize_textarea_field($brief['poster_description'] ?? ($brief['description'] ?? '')),
+    ], JSON_PRETTY_PRINT));
+    @chmod($brief_path, 0664);
+
+    $identity_report_path = preg_replace('/\.json$/i', '-identity-input.json', (string)$report_path);
+    $body_report_path = preg_replace('/\.json$/i', '-body-input.json', (string)$report_path);
+    self::write_actor_alpha_report($identity_report_path, is_array($identity_report) ? $identity_report : []);
+    self::write_actor_alpha_report($body_report_path, is_array($body_report) ? $body_report : []);
+
+    self::poster_actor_trace('COMPOSITION_PLAN_TOOL_BEGIN', 'Calling poster_composition_planner.py.', [
+        'actor_index' => (int)$actor_index,
+        'actor_id' => sanitize_key($actor_id),
+        'brief_path' => self::poster_actor_trace_file_state($brief_path),
+        'identity_report_path' => self::poster_actor_trace_file_state($identity_report_path),
+        'body_report_path' => self::poster_actor_trace_file_state($body_report_path),
+        'report_path' => $report_path,
+    ]);
+    $report = self::run_poster_json_tool('poster_composition_planner.py', [
+        'brief' => $brief_path,
+        'identity-report' => $identity_report_path,
+        'body-report' => $body_report_path,
+        'output' => $report_path,
+    ]);
+    if (!is_array($report) || empty($report)) {
+        $report = [
+            'ok' => true,
+            'schema' => 'crossmarket.poster.composition_plan.v3.3',
+            'actor_id' => sanitize_key($actor_id),
+            'actor_index' => (int)$actor_index,
+            'poster_generation_mode' => 'AUTO',
+            'identity_is_hard_gate' => true,
+            'body_geometry_is_advisory' => true,
+            'warning' => 'composition_planner_unavailable',
+        ];
+    } else {
+        $report['identity_is_hard_gate'] = true;
+        $report['body_geometry_is_advisory'] = true;
+    }
+    self::write_actor_alpha_report($report_path, $report);
+    self::poster_actor_trace('COMPOSITION_PLAN_TOOL_END', 'poster_composition_planner.py returned.', [
+        'actor_index' => (int)$actor_index,
+        'actor_id' => sanitize_key($actor_id),
+        'report_path' => self::poster_actor_trace_file_state($report_path),
+        'poster_generation_mode' => $report['poster_generation_mode'] ?? '',
+        'identity_is_hard_gate' => $report['identity_is_hard_gate'] ?? null,
+        'body_geometry_is_advisory' => $report['body_geometry_is_advisory'] ?? null,
+    ]);
+    return $report;
+}
+
+private static function repair_actor_layer_for_poster($src, $dest, $actor_index, $original_source, $identity_reference, $report_path, $composition_plan_path = '') {
     $started = microtime(true);
     self::poster_actor_trace('REPAIR_TOOL_BEGIN', 'Calling repair-poster-actor-layer.py.', [
         'actor_index' => (int)$actor_index,
@@ -3793,6 +3897,7 @@ private static function repair_actor_layer_for_poster($src, $dest, $actor_index,
         'dest' => $dest,
         'original_source' => self::poster_actor_trace_file_state($original_source),
         'identity_reference' => self::poster_actor_trace_file_state($identity_reference),
+        'composition_plan' => self::poster_actor_trace_file_state($composition_plan_path),
         'report_path' => $report_path,
     ]);
     $report = self::run_poster_json_tool('repair-poster-actor-layer.py', [
@@ -3801,6 +3906,7 @@ private static function repair_actor_layer_for_poster($src, $dest, $actor_index,
         'actor-index' => (int)$actor_index,
         'original-source' => $original_source,
         'identity-reference' => $identity_reference,
+        'composition-plan' => (string)$composition_plan_path,
         'report' => $report_path,
         'threshold' => self::PROFESSIONAL_RECOVERY_IDENTITY_MATCH_THRESHOLD,
         'margin' => self::PROFESSIONAL_RECOVERY_IDENTITY_MATCH_MARGIN,
@@ -5092,7 +5198,7 @@ private static function composite_actor_assets($background_path, $assets, $varia
 
         error_log('CMSG POSTER IDENTITY COMPOSITE MAP: path=' . $background_path . ' placement_map=' . $placement_map_path . ' background_base=' . $background_base . ' composite_preview=' . $composite_path . ' variant=' . sanitize_key($variant) . ' actors=' . wp_json_encode($valid_assets) . ' slots=' . wp_json_encode($slots));
 
-        $layers = self::prepare_identity_actor_layers($valid_assets, $layer_dir);
+        $layers = self::prepare_identity_actor_layers($valid_assets, $layer_dir, is_array($brief) ? $brief : []);
         if (count($layers) !== count($valid_assets)) {
             error_log('CMSG POSTER IDENTITY COMPOSITE ERROR: actor_layer_count_mismatch expected=' . count($valid_assets) . ' prepared=' . count($layers) . ' path=' . $background_path);
             return 0;
@@ -5271,8 +5377,9 @@ private static function png_has_transparency($path) {
     return false;
 }
 
-private static function prepare_identity_actor_layers($assets, $layer_dir) {
+private static function prepare_identity_actor_layers($assets, $layer_dir, $brief = []) {
     $path_started = microtime(true);
+    $brief = is_array($brief) ? $brief : [];
     $layers = [];
     $face_anchor_items = [];
     $seen_actor_indexes = [];
@@ -5357,11 +5464,14 @@ private static function prepare_identity_actor_layers($assets, $layer_dir) {
         $raw_cutout_path = trailingslashit($layer_dir) . 'actor_' . $label . '_cutout-raw.png';
         $identity_anchor_path = trailingslashit($layer_dir) . 'actor_' . $label . '-identity-anchor.json';
         $source_selection_path = trailingslashit($layer_dir) . 'actor_' . $label . '-source-selection.json';
+        $body_report_path = trailingslashit($layer_dir) . 'actor_' . $label . '-body-report.json';
+        $composition_plan_path = trailingslashit($layer_dir) . 'actor_' . $label . '-composition-plan.json';
         $repair_report_path = trailingslashit($layer_dir) . 'actor_' . $label . '-repair-report.json';
         $final_cutout_path = trailingslashit($layer_dir) . 'actor_' . $label . '_cutout-final.png';
         $cutout_path = $final_cutout_path;
         $alpha_report_path = trailingslashit($layer_dir) . 'actor_' . $label . '-alpha-report.json';
         $face_anchor_path = trailingslashit($layer_dir) . 'actor_' . $label . '-face-anchor.json';
+        $layer_report_path = trailingslashit($layer_dir) . 'actor_' . $label . '-layer-report.json';
         $layer_path = trailingslashit($layer_dir) . 'actor_' . $label . '_layer.png';
         $actor_context = self::set_identity_actor_diagnostic_context([
             'actor_index' => $actor_index,
@@ -5375,9 +5485,12 @@ private static function prepare_identity_actor_layers($assets, $layer_dir) {
             'destination_layer_path' => $layer_path,
             'identity_anchor_path' => $identity_anchor_path,
             'source_selection_path' => $source_selection_path,
+            'body_report_path' => $body_report_path,
+            'composition_plan_path' => $composition_plan_path,
             'repair_report_path' => $repair_report_path,
             'alpha_report_path' => $alpha_report_path,
             'face_anchor_path' => $face_anchor_path,
+            'layer_report_path' => $layer_report_path,
         ]);
         self::poster_actor_trace('ACTOR_PATHS_RESOLVED', 'Actor layer paths resolved.', [
             'actor_context' => $actor_context,
@@ -5472,7 +5585,7 @@ private static function prepare_identity_actor_layers($assets, $layer_dir) {
             'raw_report' => $raw_report,
             'final_report' => $final_report,
         ]);
-        $source_selection = self::select_best_poster_actor_source(['actor_id' => self::campaign_actor_id($actor_index), 'actor_index' => $actor_index, 'source_path' => $asset_path, 'raw_cutout_path' => $raw_cutout_path, 'final_cutout_path' => $final_cutout_path, 'layer_path' => $layer_path, 'identity_anchor_path' => $identity_anchor_path, 'raw_report' => $raw_report, 'final_report' => $final_report], $source_selection_path);
+        $source_selection = self::select_best_poster_actor_source(['actor_id' => self::campaign_actor_id($actor_index), 'actor_index' => $actor_index, 'source_path' => $asset_path, 'raw_cutout_path' => $raw_cutout_path, 'final_cutout_path' => $final_cutout_path, 'layer_path' => $layer_path, 'identity_anchor_path' => $identity_anchor_path, 'raw_report' => $raw_report, 'final_report' => $final_report, 'brief' => $brief], $source_selection_path);
         self::poster_actor_trace('SOURCE_SELECTION_END', 'select_best_poster_actor_source() returned.', [
             'actor_context' => $actor_context,
             'result_type' => is_wp_error($source_selection) ? 'WP_Error' : gettype($source_selection),
@@ -5497,11 +5610,33 @@ private static function prepare_identity_actor_layers($assets, $layer_dir) {
             return $source_selection;
         }
         $selected_source = (string)($source_selection['selected_source'] ?? ($ok ? $final_cutout_path : $raw_cutout_path));
+        self::poster_actor_trace('BODY_ANALYSIS_BEGIN', 'Calling analyze_actor_body_for_poster().', [
+            'actor_context' => $actor_context,
+            'selected_source' => self::poster_actor_trace_file_state($selected_source),
+            'body_report_path' => self::poster_actor_trace_file_state($body_report_path),
+        ]);
+        $body_report = self::analyze_actor_body_for_poster($selected_source, $actor_index, self::campaign_actor_id($actor_index), $body_report_path);
+        self::poster_actor_trace('BODY_ANALYSIS_END', 'analyze_actor_body_for_poster() returned.', [
+            'actor_context' => $actor_context,
+            'body_report_path' => self::poster_actor_trace_file_state($body_report_path),
+            'body_report' => $body_report,
+        ]);
+        self::poster_actor_trace('COMPOSITION_PLAN_BEGIN', 'Calling build_actor_composition_plan_for_poster().', [
+            'actor_context' => $actor_context,
+            'composition_plan_path' => self::poster_actor_trace_file_state($composition_plan_path),
+        ]);
+        $composition_plan = self::build_actor_composition_plan_for_poster($brief, $identity_anchor, $body_report, $actor_index, self::campaign_actor_id($actor_index), $composition_plan_path);
+        self::poster_actor_trace('COMPOSITION_PLAN_END', 'build_actor_composition_plan_for_poster() returned.', [
+            'actor_context' => $actor_context,
+            'composition_plan_path' => self::poster_actor_trace_file_state($composition_plan_path),
+            'composition_plan' => $composition_plan,
+        ]);
         self::poster_actor_trace('REPAIR_BEGIN', 'Calling repair_actor_layer_for_poster().', [
             'actor_context' => $actor_context,
             'selected_source' => self::poster_actor_trace_file_state($selected_source),
+            'composition_plan_path' => self::poster_actor_trace_file_state($composition_plan_path),
         ]);
-        $repair_report = self::repair_actor_layer_for_poster($selected_source, $final_cutout_path, $actor_index, $asset_path, $identity_anchor_path, $repair_report_path);
+        $repair_report = self::repair_actor_layer_for_poster($selected_source, $final_cutout_path, $actor_index, $asset_path, $identity_anchor_path, $repair_report_path, $composition_plan_path);
         self::poster_actor_trace('REPAIR_END', 'repair_actor_layer_for_poster() returned.', [
             'actor_context' => $actor_context,
             'result_type' => is_wp_error($repair_report) ? 'WP_Error' : gettype($repair_report),
@@ -5542,12 +5677,17 @@ private static function prepare_identity_actor_layers($assets, $layer_dir) {
             'face_anchor_path' => $face_anchor_path,
             'identity_anchor_path' => $identity_anchor_path,
             'source_selection_path' => $source_selection_path,
+            'body_report_path' => $body_report_path,
+            'composition_plan_path' => $composition_plan_path,
             'repair_report_path' => $repair_report_path,
+            'layer_report_path' => $layer_report_path,
             'fallback_used' => $fallback_used,
             'raw' => $raw_report,
             'final' => $final_report,
             'identity_anchor' => $identity_anchor,
             'source_selection' => $source_selection,
+            'body_report' => $body_report,
+            'composition_plan' => $composition_plan,
             'repair_report' => $repair_report,
             'ok' => $ok && !empty($final_report['ok']),
             'created_at' => gmdate('c'),
@@ -5587,6 +5727,7 @@ private static function prepare_identity_actor_layers($assets, $layer_dir) {
             'layer' => self::poster_actor_trace_file_state($layer_path),
         ]);
         $layer_report = self::analyze_actor_layer($layer_path);
+        self::write_actor_alpha_report($layer_report_path, $layer_report);
         self::poster_actor_trace('LAYER_ANALYZE_END', 'Prepared actor layer analysis completed.', [
             'actor_context' => $actor_context,
             'layer_report' => $layer_report,
@@ -5622,8 +5763,13 @@ private static function prepare_identity_actor_layers($assets, $layer_dir) {
             'matte_report' => $alpha_report_path,
             'identity_anchor_path' => $identity_anchor_path,
             'source_selection_path' => $source_selection_path,
+            'body_report_path' => $body_report_path,
+            'composition_plan_path' => $composition_plan_path,
             'repair_report_path' => $repair_report_path,
+            'layer_report_path' => $layer_report_path,
             'source_selection' => $source_selection,
+            'body_report' => $body_report,
+            'composition_plan' => $composition_plan,
             'repair_report' => $repair_report,
             'fallback_used' => $fallback_used,
             'analysis' => $layer_report,
